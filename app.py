@@ -41,22 +41,32 @@ HTML_PAGE = """
         box-sizing: border-box;
       }
       body {
-        background: #f3f4f6;
         margin: 0;
         padding: 2rem 1rem;
         display: flex;
         align-items: center;
         justify-content: center;
         min-height: 100vh;
+
+        /* Bakgrunnsbildet ditt */
+        background-image: url('/static/background-kids.png');
+        background-size: cover;        /* fyller hele skjermen */
+        background-position: center;   /* midtstilt motiv */
+        background-repeat: no-repeat;  /* ikke gjenta */
+        background-attachment: fixed;  /* står stille når du scroller */
       }
+
+
       .card {
-        background: white;
+        background: rgba(255, 255, 255, 0.88); /* litt gjennomsiktig hvit */
+        backdrop-filter: blur(10px);           /* glass-effekt */
         padding: 2rem 2.5rem;
         border-radius: 1.25rem;
-        box-shadow: 0 18px 40px rgba(15,23,42,0.15);
+        box-shadow: 0 18px 40px rgba(15,23,42,0.25);
         max-width: 720px;
         width: 100%;
       }
+
       h1 {
         margin: 0 0 0.35rem 0;
         font-size: 1.8rem;
