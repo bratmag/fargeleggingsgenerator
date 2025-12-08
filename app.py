@@ -2,10 +2,9 @@ import base64
 import io
 import zipfile
 from datetime import datetime
-from pathlib import Path
 
 from flask import Flask, request, send_file, render_template_string
-from openai import OpenAI
+from openai import OpenAI, BadRequestError
 from PIL import Image
 
 client = OpenAI()
@@ -222,21 +221,23 @@ HTML_PAGE = """
 """
 
 
-
 def build_prompt(detail_level: str) -> str:
     extra = ""
     if detail_level == "simple":
         extra = "\nMake the drawing very simple with thick lines and large areas for coloring."
     elif detail_level == "detailed":
         extra = "\nKeep some extra details and textures, but still suitable for children to color."
-    # normal = ingen ekstra tekst
     return BASE_PROMPT + extra
 
 
 def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
     """Kaller OpenAI image-API og returnerer PNG-bytes for fargeleggingsbildet."""
-
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+    # nedskalere veldig store bilder for å spare minne og tid
+    max_dim = 1600
+    if max(img.size) > max_dim:
+        img.thumbnail((max_dim, max_dim), Image.LANCZOS)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -245,14 +246,20 @@ def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
 
     prompt = build_prompt(detail_level)
 
-    result = client.images.edit(
-        model="gpt-image-1",
-        image=buf,
-        prompt=prompt,
-        size=IMAGE_SIZE_STR,
-        output_format="png",
-        quality="high",
-    )
+    try:
+        result = client.images.edit(
+            model="gpt-image-1",
+            image=buf,
+            prompt=prompt,
+            size=IMAGE_SIZE_STR,
+            output_format="png",
+            quality="high",
+        )
+    except BadRequestError as e:
+        # OpenAI safety/moderation blokkerte bildet
+        if "moderation_blocked" in str(e):
+            raise ValueError("moderation_blocked")
+        raise
 
     image_base64 = result.data[0].b64_json
     return base64.b64decode(image_base64)
@@ -304,17 +311,26 @@ def process():
         if not original_bytes:
             continue
 
-        coloring_bytes = generate_coloring_bytes(original_bytes, detail)
+        try:
+            coloring_bytes = generate_coloring_bytes(original_bytes, detail)
+        except ValueError as e:
+            if "moderation_blocked" in str(e):
+                return (
+                    "Bildet ditt ble stoppet av sikkerhetssystemet til OpenAI. "
+                    "Prøv et annet bilde (mer klær, nøytral setting, ingen sensitive situasjoner).",
+                    400,
+                )
+            else:
+                raise
+
         combined_png = combine_side_by_side_bytes(original_bytes, coloring_bytes)
 
-        # lag et navn uten mellomrom
-        stem = Path(file.filename).stem.replace(" ", "_") or "bilde"
+        stem = (file.filename or "bilde").rsplit(".", 1)[0].replace(" ", "_")
         results.append((f"{stem}_combo.png", combined_png))
 
     if not results:
         return "Ingen gyldige bilder.", 400
 
-    # Hvis bare ett bilde -> returner PNG direkte
     if len(results) == 1:
         name, data = results[0]
         return send_file(
@@ -324,7 +340,6 @@ def process():
             download_name=name,
         )
 
-    # Flere bilder -> lag ZIP i minnet
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, data in results:
