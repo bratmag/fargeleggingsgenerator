@@ -56,7 +56,6 @@ HTML_PAGE = """
         background-attachment: fixed;  /* står stille når du scroller */
       }
 
-
       .card {
         background: rgba(255, 255, 255, 0.88); /* litt gjennomsiktig hvit */
         backdrop-filter: blur(10px);           /* glass-effekt */
@@ -152,6 +151,56 @@ HTML_PAGE = """
         color: #9ca3af;
       }
 
+      /* Loading overlay + "progressbar" */
+      .loading-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.55);
+        display: none; /* skjult som default */
+        align-items: center;
+        justify-content: center;
+        z-index: 50;
+      }
+      .loading-box {
+        background: white;
+        padding: 1.25rem 1.75rem;
+        border-radius: 0.9rem;
+        box-shadow: 0 18px 40px rgba(15,23,42,0.4);
+        max-width: 320px;
+        width: 90%;
+        text-align: center;
+      }
+      .loading-text {
+        font-size: 0.95rem;
+        margin-bottom: 0.75rem;
+        color: #374151;
+      }
+      .loading-bar {
+        width: 100%;
+        height: 6px;
+        border-radius: 999px;
+        background: #e5e7eb;
+        overflow: hidden;
+      }
+      .loading-bar-inner {
+        width: 40%;
+        height: 100%;
+        border-radius: 999px;
+        background: #4f46e5;
+        animation: loading-pulse 1.2s infinite ease-in-out;
+      }
+      @keyframes loading-pulse {
+        0% {
+          transform: translateX(-100%);
+        }
+        50% {
+          transform: translateX(50%);
+        }
+        100% {
+          transform: translateX(200%);
+        }
+      }
+
       @media (max-width: 600px) {
         .card {
           padding: 1.5rem 1.25rem;
@@ -204,9 +253,21 @@ HTML_PAGE = """
       </div>
     </div>
 
+    <div id="loading-overlay" class="loading-overlay">
+      <div class="loading-box">
+        <div class="loading-text">Genererer fargeleggingsark, vennligst vent…</div>
+        <div class="loading-bar">
+          <div class="loading-bar-inner"></div>
+        </div>
+      </div>
+    </div>
+
     <script>
       const dropzone = document.getElementById('dropzone');
       const fileInput = document.getElementById('file-input');
+      const form = document.getElementById('form');
+      const loadingOverlay = document.getElementById('loading-overlay');
+      const submitButton = document.querySelector('#form button[type="submit"]');
 
       dropzone.addEventListener('click', () => fileInput.click());
 
@@ -225,6 +286,18 @@ HTML_PAGE = """
         const files = e.dataTransfer.files;
         fileInput.files = files;
       });
+
+      if (form) {
+        form.addEventListener('submit', () => {
+          if (loadingOverlay) {
+            loadingOverlay.style.display = 'flex';
+          }
+          if (submitButton) {
+            submitButton.disabled = true;
+            submitButton.textContent = "Genererer...";
+          }
+        });
+      }
     </script>
   </body>
 </html>
