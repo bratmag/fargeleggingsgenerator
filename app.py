@@ -5,7 +5,7 @@ from datetime import datetime
 
 from flask import Flask, request, send_file, render_template_string
 from openai import OpenAI, BadRequestError
-from PIL import Image
+from PIL import Image, ImageOps
 
 client = OpenAI()
 
@@ -315,7 +315,9 @@ def build_prompt(detail_level: str) -> str:
 
 def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
     """Kaller OpenAI image-API og returnerer PNG-bytes for fargeleggingsbildet."""
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+       img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img = ImageOps.exif_transpose(img)
+
 
     # nedskalere veldig store bilder for å spare minne og tid
     max_dim = 1600
@@ -351,7 +353,11 @@ def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
 def combine_side_by_side_bytes(original_bytes: bytes, coloring_bytes: bytes) -> bytes:
     """Kombinerer original + fargeleggingsbilde og returnerer PNG-bytes."""
     orig = Image.open(io.BytesIO(original_bytes)).convert("RGB")
+    # Bruk EXIF-orientering slik at bildet vises som på mobilen/PC-en
+    orig = ImageOps.exif_transpose(orig)
+
     col = Image.open(io.BytesIO(coloring_bytes)).convert("RGB")
+
 
     canvas = Image.new("RGB", (SIDE_WIDTH * 2, SIDE_HEIGHT), color=(255, 255, 255))
 
