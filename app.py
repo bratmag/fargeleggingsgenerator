@@ -172,7 +172,7 @@ HTML_PAGE = """
     <div class="card">
       <h1>Fargeleggingsgenerator</h1>
       <p class="sub">
-        Last opp barnebilder og få et fargeleggingsark med originalen ved siden av.
+        Last opp dine bilder og få det kombinert med et fargeleggingsark.
       </p>
 
       <form id="form" action="/process" method="post" enctype="multipart/form-data">
