@@ -9,6 +9,9 @@ from PIL import Image, ImageOps
 
 client = OpenAI()
 
+# Hvor mange bilder som tillates per kjøring (Render sliter over 1)
+MAX_FILES = 1
+
 # Standard størrelse på hver "side" (original / fargelegging)
 SIDE_WIDTH = 1024
 SIDE_HEIGHT = 1536
@@ -76,7 +79,9 @@ HTML_PAGE = """
         font-size: 0.95rem;
         line-height: 1.5;
       }
+
       .dropzone {
+        position: relative;
         margin: 0 0 0.6rem 0;
         border: 2px dashed #cbd5f5;
         border-radius: 0.9rem;
@@ -95,19 +100,26 @@ HTML_PAGE = """
         border-color: #4f46e5;
         box-shadow: 0 0 0 2px rgba(79,70,229,0.3);
       }
+
+      /* Filinput er "usynlig", men label-click åpner dialogen */
       .dropzone input[type="file"] {
-        display: none;
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        cursor: pointer;
       }
+
       .dropzone-title {
         font-weight: 600;
         margin-bottom: 0.3rem;
+        pointer-events: none;
       }
       .dropzone-sub {
         font-size: 0.9rem;
         color: #6b7280;
+        pointer-events: none;
       }
 
-      /* Tekst som viser hvilke filer som er valgt */
       .file-list {
         margin: 0 0 1.0rem 0;
         font-size: 0.8rem;
@@ -226,9 +238,9 @@ HTML_PAGE = """
 
       <form id="form" action="/process" method="post" enctype="multipart/form-data">
         <label class="dropzone" id="dropzone">
-          <input id="file-input" type="file" name="images" accept="image/*" multiple>
-          <div class="dropzone-title">Slipp bilder her</div>
-          <div class="dropzone-sub">eller klikk for å velge (du kan velge flere)</div>
+          <input id="file-input" type="file" name="images" accept="image/*">
+          <div class="dropzone-title">Slipp ett bilde her</div>
+          <div class="dropzone-sub">eller klikk for å velge ett bilde</div>
         </label>
 
         <div id="file-list" class="file-list file-list-empty">
@@ -248,7 +260,7 @@ HTML_PAGE = """
         </div>
 
         <p class="hint">
-          Hvis du laster opp flere bilder samtidig, får du en ZIP-fil med ett resultat per bilde.
+          Foreløpig støttes ett bilde om gangen. Større opplastinger kan gjøre at serveren stopper.
         </p>
       </form>
 
@@ -263,7 +275,7 @@ HTML_PAGE = """
         <div class="loader"></div>
         <div>Genererer fargeleggingsark …</div>
         <div style="font-size:0.8rem; color:#6b7280; margin-top:0.4rem;">
-          Dette kan ta noen sekunder per bilde.
+          Dette kan ta opptil et par minutter.
         </div>
       </div>
     </div>
@@ -283,19 +295,9 @@ HTML_PAGE = """
         }
         fileList.classList.remove('file-list-empty');
 
-        if (files.length === 1) {
-          fileList.textContent = `1 fil valgt: ${files[0].name}`;
-        } else {
-          const names = Array.from(files).slice(0, 3).map(f => f.name);
-          let text = `${files.length} filer valgt`;
-          if (names.length) {
-            text += ` (f.eks. ${names.join(', ')}${files.length > 3 ? ', ...' : ''})`;
-          }
-          fileList.textContent = text;
-        }
+        // vi forventer maks 1 fil
+        fileList.textContent = `Valgt fil: ${files[0].name}`;
       }
-
-      dropzone.addEventListener('click', () => fileInput.click());
 
       fileInput.addEventListener('change', () => {
         updateFileList(fileInput.files);
@@ -314,24 +316,27 @@ HTML_PAGE = """
         e.preventDefault();
         dropzone.classList.remove('dragover');
         const files = e.dataTransfer.files;
-        fileInput.files = files;
-        updateFileList(files);
+        // tar bare første fil
+        if (files && files.length > 0) {
+          const dataTransfer = new DataTransfer();
+          dataTransfer.items.add(files[0]);
+          fileInput.files = dataTransfer.files;
+          updateFileList(fileInput.files);
+        }
       });
 
       // Vis overlay når vi sender inn skjemaet
       let overlayTimeout = null;
       form.addEventListener('submit', () => {
         overlay.classList.remove('hidden');
-        // failsafe: skjul etter 45 sekunder uansett
+        // failsafe: skjul etter 5 minutter uansett
         if (overlayTimeout) clearTimeout(overlayTimeout);
         overlayTimeout = setTimeout(() => {
           overlay.classList.add('hidden');
-        }, 45000);
+        }, 5 * 60 * 1000);
       });
 
-      // Mange nettlesere mister fokus når nedlastingsdialogen vises.
-      // Når vinduet får fokus igjen antar vi at nedlastingen er ferdig
-      // og skjuler overlayen.
+      // Når vinduet får fokus igjen etter nedlasting, skjul overlay
       window.addEventListener('focus', () => {
         if (!overlay.classList.contains('hidden')) {
           setTimeout(() => overlay.classList.add('hidden'), 300);
@@ -429,11 +434,19 @@ def process():
     if not files or files[0].filename == "":
         return "Ingen filer lastet opp.", 400
 
+    # håndter for mange filer (burde egentlig ikke skje, siden UI bare lar deg velge ett)
+    if len(files) > MAX_FILES:
+        return (
+            f"På grunn av begrensninger i serveren kan du foreløpig bare laste opp "
+            f"{MAX_FILES} bilde om gangen.",
+            400,
+        )
+
     detail = request.form.get("detail", "normal")
 
     results = []
 
-    for file in files:
+    for file in files[:MAX_FILES]:
         original_bytes = file.read()
         if not original_bytes:
             continue
@@ -458,29 +471,13 @@ def process():
     if not results:
         return "Ingen gyldige bilder.", 400
 
-    if len(results) == 1:
-        name, data = results[0]
-        return send_file(
-            io.BytesIO(data),
-            mimetype="image/png",
-            as_attachment=True,
-            download_name=name,
-        )
-
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for name, data in results:
-            zf.writestr(name, data)
-    zip_buf.seek(0)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    zip_name = f"fargeleggingsark_{timestamp}.zip"
-
+    # siden vi bare støtter ett bilde, blir dette alltid én fil
+    name, data = results[0]
     return send_file(
-        zip_buf,
-        mimetype="application/zip",
+        io.BytesIO(data),
+        mimetype="image/png",
         as_attachment=True,
-        download_name=zip_name,
+        download_name=name,
     )
 
 
