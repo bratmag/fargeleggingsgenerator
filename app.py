@@ -50,15 +50,15 @@ HTML_PAGE = """
 
         /* Bakgrunnsbildet ditt */
         background-image: url('/static/background-kids.png');
-        background-size: cover;        /* fyller hele skjermen */
-        background-position: center;   /* midtstilt motiv */
-        background-repeat: no-repeat;  /* ikke gjenta */
-        background-attachment: fixed;  /* står stille når du scroller */
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+        background-attachment: fixed;
       }
 
       .card {
-        background: rgba(255, 255, 255, 0.88); /* litt gjennomsiktig hvit */
-        backdrop-filter: blur(10px);           /* glass-effekt */
+        background: rgba(255, 255, 255, 0.88);
+        backdrop-filter: blur(10px);
         padding: 2rem 2.5rem;
         border-radius: 1.25rem;
         box-shadow: 0 18px 40px rgba(15,23,42,0.25);
@@ -77,7 +77,7 @@ HTML_PAGE = """
         line-height: 1.5;
       }
       .dropzone {
-        margin: 0 0 1.2rem 0;
+        margin: 0 0 0.6rem 0;
         border: 2px dashed #cbd5f5;
         border-radius: 0.9rem;
         padding: 1.5rem 1.25rem;
@@ -106,6 +106,18 @@ HTML_PAGE = """
         font-size: 0.9rem;
         color: #6b7280;
       }
+
+      /* Tekst som viser hvilke filer som er valgt */
+      .file-list {
+        margin: 0 0 1.0rem 0;
+        font-size: 0.8rem;
+        color: #4b5563;
+        text-align: left;
+      }
+      .file-list-empty {
+        color: #9ca3af;
+      }
+
       .controls-row {
         display: flex;
         flex-wrap: wrap;
@@ -151,54 +163,39 @@ HTML_PAGE = """
         color: #9ca3af;
       }
 
-      /* Loading overlay + "progressbar" */
-      .loading-overlay {
+      /* Overlay for "genererer..." */
+      .overlay {
         position: fixed;
         inset: 0;
-        background: rgba(15, 23, 42, 0.55);
-        display: none; /* skjult som default */
+        background: rgba(15,23,42,0.55);
+        display: flex;
         align-items: center;
         justify-content: center;
         z-index: 50;
       }
-      .loading-box {
-        background: white;
-        padding: 1.25rem 1.75rem;
+      .overlay.hidden {
+        display: none;
+      }
+      .overlay-box {
+        background: #ffffff;
+        padding: 1.5rem 1.75rem;
         border-radius: 0.9rem;
-        box-shadow: 0 18px 40px rgba(15,23,42,0.4);
+        box-shadow: 0 18px 40px rgba(15,23,42,0.3);
         max-width: 320px;
-        width: 90%;
         text-align: center;
-      }
-      .loading-text {
         font-size: 0.95rem;
-        margin-bottom: 0.75rem;
-        color: #374151;
       }
-      .loading-bar {
-        width: 100%;
-        height: 6px;
+      .loader {
+        width: 36px;
+        height: 36px;
         border-radius: 999px;
-        background: #e5e7eb;
-        overflow: hidden;
+        border: 3px solid #e5e7eb;
+        border-top-color: #4f46e5;
+        animation: spin 0.9s linear infinite;
+        margin: 0 auto 0.9rem auto;
       }
-      .loading-bar-inner {
-        width: 40%;
-        height: 100%;
-        border-radius: 999px;
-        background: #4f46e5;
-        animation: loading-pulse 1.2s infinite ease-in-out;
-      }
-      @keyframes loading-pulse {
-        0% {
-          transform: translateX(-100%);
-        }
-        50% {
-          transform: translateX(50%);
-        }
-        100% {
-          transform: translateX(200%);
-        }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
       }
 
       @media (max-width: 600px) {
@@ -213,6 +210,9 @@ HTML_PAGE = """
           width: 100%;
           text-align: center;
           justify-content: center;
+        }
+        .file-list {
+          text-align: center;
         }
       }
     </style>
@@ -230,6 +230,10 @@ HTML_PAGE = """
           <div class="dropzone-title">Slipp bilder her</div>
           <div class="dropzone-sub">eller klikk for å velge (du kan velge flere)</div>
         </label>
+
+        <div id="file-list" class="file-list file-list-empty">
+          Ingen filer valgt ennå.
+        </div>
 
         <div class="controls-row">
           <div class="control-group">
@@ -253,11 +257,13 @@ HTML_PAGE = """
       </div>
     </div>
 
-    <div id="loading-overlay" class="loading-overlay">
-      <div class="loading-box">
-        <div class="loading-text">Genererer fargeleggingsark, vennligst vent…</div>
-        <div class="loading-bar">
-          <div class="loading-bar-inner"></div>
+    <!-- Overlay som vises mens generering pågår -->
+    <div id="overlay" class="overlay hidden">
+      <div class="overlay-box">
+        <div class="loader"></div>
+        <div>Genererer fargeleggingsark …</div>
+        <div style="font-size:0.8rem; color:#6b7280; margin-top:0.4rem;">
+          Dette kan ta noen sekunder per bilde.
         </div>
       </div>
     </div>
@@ -265,11 +271,35 @@ HTML_PAGE = """
     <script>
       const dropzone = document.getElementById('dropzone');
       const fileInput = document.getElementById('file-input');
+      const fileList = document.getElementById('file-list');
       const form = document.getElementById('form');
-      const loadingOverlay = document.getElementById('loading-overlay');
-      const submitButton = document.querySelector('#form button[type="submit"]');
+      const overlay = document.getElementById('overlay');
+
+      function updateFileList(files) {
+        if (!files || files.length === 0) {
+          fileList.textContent = 'Ingen filer valgt ennå.';
+          fileList.classList.add('file-list-empty');
+          return;
+        }
+        fileList.classList.remove('file-list-empty');
+
+        if (files.length === 1) {
+          fileList.textContent = `1 fil valgt: ${files[0].name}`;
+        } else {
+          const names = Array.from(files).slice(0, 3).map(f => f.name);
+          let text = `${files.length} filer valgt`;
+          if (names.length) {
+            text += ` (f.eks. ${names.join(', ')}${files.length > 3 ? ', ...' : ''})`;
+          }
+          fileList.textContent = text;
+        }
+      }
 
       dropzone.addEventListener('click', () => fileInput.click());
+
+      fileInput.addEventListener('change', () => {
+        updateFileList(fileInput.files);
+      });
 
       dropzone.addEventListener('dragover', (e) => {
         e.preventDefault();
@@ -285,19 +315,28 @@ HTML_PAGE = """
         dropzone.classList.remove('dragover');
         const files = e.dataTransfer.files;
         fileInput.files = files;
+        updateFileList(files);
       });
 
-      if (form) {
-        form.addEventListener('submit', () => {
-          if (loadingOverlay) {
-            loadingOverlay.style.display = 'flex';
-          }
-          if (submitButton) {
-            submitButton.disabled = true;
-            submitButton.textContent = "Genererer...";
-          }
-        });
-      }
+      // Vis overlay når vi sender inn skjemaet
+      let overlayTimeout = null;
+      form.addEventListener('submit', () => {
+        overlay.classList.remove('hidden');
+        // failsafe: skjul etter 45 sekunder uansett
+        if (overlayTimeout) clearTimeout(overlayTimeout);
+        overlayTimeout = setTimeout(() => {
+          overlay.classList.add('hidden');
+        }, 45000);
+      });
+
+      // Mange nettlesere mister fokus når nedlastingsdialogen vises.
+      // Når vinduet får fokus igjen antar vi at nedlastingen er ferdig
+      // og skjuler overlayen.
+      window.addEventListener('focus', () => {
+        if (!overlay.classList.contains('hidden')) {
+          setTimeout(() => overlay.classList.add('hidden'), 300);
+        }
+      });
     </script>
   </body>
 </html>
@@ -350,11 +389,10 @@ def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
     return base64.b64decode(image_base64)
 
 
-
 def combine_side_by_side_bytes(original_bytes: bytes, coloring_bytes: bytes) -> bytes:
     """Kombinerer original + fargeleggingsbilde og returnerer PNG-bytes."""
     orig = Image.open(io.BytesIO(original_bytes)).convert("RGB")
-    # Bruk EXIF-orientering på originalen også i kombobildet
+    # EXIF-orientering på originalen i kombobildet
     orig = ImageOps.exif_transpose(orig)
 
     col = Image.open(io.BytesIO(coloring_bytes)).convert("RGB")
@@ -375,7 +413,6 @@ def combine_side_by_side_bytes(original_bytes: bytes, coloring_bytes: bytes) -> 
     canvas.save(out_buf, format="PNG")
     out_buf.seek(0)
     return out_buf.getvalue()
-
 
 
 app = Flask(__name__)
