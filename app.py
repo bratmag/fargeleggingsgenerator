@@ -315,9 +315,9 @@ def build_prompt(detail_level: str) -> str:
 
 def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
     """Kaller OpenAI image-API og returnerer PNG-bytes for fargeleggingsbildet."""
-       img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    # respekter EXIF-orientering (slik mobilen viser bildet)
     img = ImageOps.exif_transpose(img)
-
 
     # nedskalere veldig store bilder for å spare minne og tid
     max_dim = 1600
@@ -350,14 +350,14 @@ def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
     return base64.b64decode(image_base64)
 
 
+
 def combine_side_by_side_bytes(original_bytes: bytes, coloring_bytes: bytes) -> bytes:
     """Kombinerer original + fargeleggingsbilde og returnerer PNG-bytes."""
     orig = Image.open(io.BytesIO(original_bytes)).convert("RGB")
-    # Bruk EXIF-orientering slik at bildet vises som på mobilen/PC-en
+    # Bruk EXIF-orientering på originalen også i kombobildet
     orig = ImageOps.exif_transpose(orig)
 
     col = Image.open(io.BytesIO(coloring_bytes)).convert("RGB")
-
 
     canvas = Image.new("RGB", (SIDE_WIDTH * 2, SIDE_HEIGHT), color=(255, 255, 255))
 
@@ -375,6 +375,7 @@ def combine_side_by_side_bytes(original_bytes: bytes, coloring_bytes: bytes) -> 
     canvas.save(out_buf, format="PNG")
     out_buf.seek(0)
     return out_buf.getvalue()
+
 
 
 app = Flask(__name__)
