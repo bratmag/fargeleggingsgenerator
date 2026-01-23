@@ -45,23 +45,12 @@ HTML_PAGE = """
     <meta charset="utf-8">
     <title>Fargeleggingsgenerator</title>
     <style>
-      :root {
-        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        color: #0f172a;
-      }
+      :root { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #0f172a; }
       * { box-sizing: border-box; }
       body {
-        margin: 0;
-        padding: 2rem 1rem;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 100vh;
+        margin: 0; padding: 2rem 1rem; display: flex; align-items: center; justify-content: center; min-height: 100vh;
         background-image: url('/static/background-kids.png');
-        background-size: cover;
-        background-position: center;
-        background-repeat: no-repeat;
-        background-attachment: fixed;
+        background-size: cover; background-position: center; background-repeat: no-repeat; background-attachment: fixed;
       }
       .card {
         background: rgba(255, 255, 255, 0.88);
@@ -69,8 +58,7 @@ HTML_PAGE = """
         padding: 2rem 2.5rem;
         border-radius: 1.25rem;
         box-shadow: 0 18px 40px rgba(15,23,42,0.25);
-        max-width: 720px;
-        width: 100%;
+        max-width: 720px; width: 100%;
       }
       h1 { margin: 0 0 0.35rem 0; font-size: 1.8rem; }
       .sub { margin: 0 0 1.2rem 0; color: #6b7280; font-size: 0.95rem; line-height: 1.5; }
@@ -85,95 +73,37 @@ HTML_PAGE = """
         background: #f9fafb;
         cursor: pointer;
         transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
       }
-      .dropzone.dragover {
-        background: #eef2ff;
-        border-color: #4f46e5;
-        box-shadow: 0 0 0 2px rgba(79,70,229,0.3);
-      }
-      .dropzone input[type="file"] {
-        position: absolute;
-        inset: 0;
-        opacity: 0;
-        cursor: pointer;
-      }
+      .dropzone.dragover { background: #eef2ff; border-color: #4f46e5; box-shadow: 0 0 0 2px rgba(79,70,229,0.3); }
+      .dropzone input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
       .dropzone-title { font-weight: 600; margin-bottom: 0.3rem; pointer-events: none; }
       .dropzone-sub { font-size: 0.9rem; color: #6b7280; pointer-events: none; }
 
-      .file-list {
-        margin: 0 0 1.0rem 0;
-        font-size: 0.8rem;
-        color: #4b5563;
-        text-align: left;
-      }
+      .file-list { margin: 0 0 1.0rem 0; font-size: 0.8rem; color: #4b5563; text-align: left; }
       .file-list-empty { color: #9ca3af; }
 
-      .controls-row {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        justify-content: space-between;
-        gap: 1rem;
-      }
-      .control-group {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.4rem;
-        font-size: 0.9rem;
-        color: #374151;
-      }
-      select {
-        padding: 0.35rem 0.7rem;
-        border-radius: 999px;
-        border: 1px solid #d1d5db;
-        font-size: 0.9rem;
-        background: #f9fafb;
-      }
+      .controls-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; }
+      .control-group { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; color: #374151; }
+      select { padding: 0.35rem 0.7rem; border-radius: 999px; border: 1px solid #d1d5db; font-size: 0.9rem; background: #f9fafb; }
       button {
-        background: #4f46e5;
-        color: white;
-        border: none;
-        border-radius: 999px;
-        padding: 0.65rem 1.5rem;
-        font-size: 0.95rem;
-        cursor: pointer;
-        white-space: nowrap;
+        background: #4f46e5; color: white; border: none; border-radius: 999px;
+        padding: 0.65rem 1.5rem; font-size: 0.95rem; cursor: pointer; white-space: nowrap;
       }
       button:hover { background: #4338ca; }
       .hint { margin-top: 0.9rem; font-size: 0.8rem; color: #6b7280; }
       .footer { margin-top: 1.2rem; font-size: 0.75rem; color: #9ca3af; }
 
-      .overlay {
-        position: fixed;
-        inset: 0;
-        background: rgba(15,23,42,0.55);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        z-index: 50;
-      }
+      .overlay { position: fixed; inset: 0; background: rgba(15,23,42,0.55); display: flex; align-items: center; justify-content: center; z-index: 50; }
       .overlay.hidden { display: none; }
       .overlay-box {
-        background: #ffffff;
-        padding: 1.5rem 1.75rem;
-        border-radius: 0.9rem;
+        background: #ffffff; padding: 1.5rem 1.75rem; border-radius: 0.9rem;
         box-shadow: 0 18px 40px rgba(15,23,42,0.3);
-        max-width: 380px;
-        text-align: center;
-        font-size: 0.95rem;
+        max-width: 380px; text-align: center; font-size: 0.95rem;
       }
       .loader {
-        width: 36px;
-        height: 36px;
-        border-radius: 999px;
-        border: 3px solid #e5e7eb;
-        border-top-color: #4f46e5;
-        animation: spin 0.9s linear infinite;
-        margin: 0 auto 0.9rem auto;
+        width: 36px; height: 36px; border-radius: 999px; border: 3px solid #e5e7eb; border-top-color: #4f46e5;
+        animation: spin 0.9s linear infinite; margin: 0 auto 0.9rem auto;
       }
       @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -193,7 +123,6 @@ HTML_PAGE = """
       </p>
 
       <form id="form" action="/process" method="post" enctype="multipart/form-data">
-
         <fieldset style="border:none; padding:0; margin: 0 0 1rem 0;">
           <div style="display:flex; gap:1rem; flex-wrap:wrap;">
             <label class="control-group">
@@ -207,30 +136,22 @@ HTML_PAGE = """
           </div>
         </fieldset>
 
-        <!-- SINGLE -->
         <div id="singleBox">
           <label class="dropzone" id="dropzoneSingle">
             <input id="file-input-single" type="file" name="images" accept="image/*">
             <div class="dropzone-title">Slipp ett bilde her</div>
             <div class="dropzone-sub">eller klikk for å velge ett bilde</div>
           </label>
-
-          <div id="file-list-single" class="file-list file-list-empty">
-            Ingen filer valgt ennå.
-          </div>
+          <div id="file-list-single" class="file-list file-list-empty">Ingen filer valgt ennå.</div>
         </div>
 
-        <!-- BOOKLET -->
         <div id="bookletBox" style="display:none;">
           <label class="dropzone" id="dropzoneBooklet">
             <input id="file-input-booklet" type="file" name="booklet_images" accept="image/*" multiple>
             <div class="dropzone-title">Slipp 2–4 bilder her</div>
             <div class="dropzone-sub">eller klikk for å velge flere bilder</div>
           </label>
-
-          <div id="file-list-booklet" class="file-list file-list-empty">
-            Ingen filer valgt ennå.
-          </div>
+          <div id="file-list-booklet" class="file-list file-list-empty">Ingen filer valgt ennå.</div>
 
           <div class="controls-row" style="margin-bottom: 0.5rem;">
             <div class="control-group">
@@ -246,10 +167,10 @@ HTML_PAGE = """
             <div class="control-group">
               <label>Layout:</label>
               <label class="control-group">
-                <input type="radio" name="layout" value="combo" checked> Komboside
+                <input type="radio" name="layout" value="combo"> Komboside
               </label>
               <label class="control-group">
-                <input type="radio" name="layout" value="album"> Album (2 sider per bilde)
+                <input type="radio" name="layout" value="album" checked> Album (1 bilde per side)
               </label>
             </div>
           </div>
@@ -281,9 +202,7 @@ HTML_PAGE = """
       <div class="overlay-box">
         <div class="loader"></div>
         <div id="overlayText">Genererer …</div>
-        <div style="font-size:0.8rem; color:#6b7280; margin-top:0.4rem;">
-          Dette kan ta litt tid.
-        </div>
+        <div style="font-size:0.8rem; color:#6b7280; margin-top:0.4rem;">Dette kan ta litt tid.</div>
       </div>
     </div>
 
@@ -313,7 +232,7 @@ HTML_PAGE = """
 
         hintText.textContent = isSingle
           ? 'Foreløpig støttes ett bilde om gangen. Større opplastinger kan gjøre at serveren stopper.'
-          : 'PDF: maks 4 bilder. Velg "Album" for original + fargelegging på egne sider.';
+          : 'PDF: maks 4 bilder. Album gir 1 bilde per side.';
       }
 
       document.querySelectorAll('input[name="mode"]').forEach(r => {
@@ -348,27 +267,17 @@ HTML_PAGE = """
       singleInput.addEventListener('change', updateSingleList);
       bookletInput.addEventListener('change', updateBookletList);
 
-      // Drag & drop støtte for begge dropzones
       function attachDnD(dropzoneEl, inputEl, updateFn, singleOnly=false) {
-        dropzoneEl.addEventListener('dragover', (e) => {
-          e.preventDefault();
-          dropzoneEl.classList.add('dragover');
-        });
-        dropzoneEl.addEventListener('dragleave', () => {
-          dropzoneEl.classList.remove('dragover');
-        });
+        dropzoneEl.addEventListener('dragover', (e) => { e.preventDefault(); dropzoneEl.classList.add('dragover'); });
+        dropzoneEl.addEventListener('dragleave', () => { dropzoneEl.classList.remove('dragover'); });
         dropzoneEl.addEventListener('drop', (e) => {
           e.preventDefault();
           dropzoneEl.classList.remove('dragover');
           const files = e.dataTransfer.files;
           if (!files || files.length === 0) return;
-
           const dt = new DataTransfer();
-          if (singleOnly) {
-            dt.items.add(files[0]);
-          } else {
-            for (const f of files) dt.items.add(f);
-          }
+          if (singleOnly) dt.items.add(files[0]);
+          else for (const f of files) dt.items.add(f);
           inputEl.files = dt.files;
           updateFn();
         });
@@ -377,7 +286,6 @@ HTML_PAGE = """
       attachDnD(document.getElementById('dropzoneSingle'), singleInput, updateSingleList, true);
       attachDnD(document.getElementById('dropzoneBooklet'), bookletInput, updateBookletList, false);
 
-      // Overlay når vi sender inn
       let overlayTimeout = null;
       form.addEventListener('submit', () => {
         overlay.classList.remove('hidden');
@@ -386,12 +294,9 @@ HTML_PAGE = """
       });
 
       window.addEventListener('focus', () => {
-        if (!overlay.classList.contains('hidden')) {
-          setTimeout(() => overlay.classList.add('hidden'), 300);
-        }
+        if (!overlay.classList.contains('hidden')) setTimeout(() => overlay.classList.add('hidden'), 300);
       });
 
-      // init
       setMode('single');
     </script>
   </body>
@@ -467,13 +372,21 @@ def combine_side_by_side_bytes(original_bytes: bytes, coloring_bytes: bytes) -> 
     return out_buf.getvalue()
 
 
+def pil_to_imagereader(img: Image.Image) -> ImageReader:
+    """Robust: gi ReportLab en PNG-buffer i stedet for en 'live' PIL Image."""
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    return ImageReader(buf)
+
+
 def _pdf_page_geometry(paper: str):
     if paper not in ("A4", "A5"):
         paper = "A4"
     pagesize = A4 if paper == "A4" else A5
     page_w, page_h = pagesize
 
-    # Marger for "hefte"/album (innbinding venstre)
+    # Marger (innbinding venstre)
     inner = 20 * mm
     outer = 12 * mm
     top = 12 * mm
@@ -483,12 +396,11 @@ def _pdf_page_geometry(paper: str):
     y0 = bottom
     usable_w = page_w - inner - outer
     usable_h = page_h - top - bottom
-
     return pagesize, (x0, y0, usable_w, usable_h)
 
 
 def build_pdf_from_combo_pngs(combo_pngs: list[bytes], paper: str) -> bytes:
-    """Bygger PDF (A4/A5) fra ferdige kombobilde-PNGs. Beholder farger i originaldelen."""
+    """Kombosider: én side per bilde (original venstre + fargelegging høyre)."""
     pagesize, (x0, y0, usable_w, usable_h) = _pdf_page_geometry(paper)
 
     out = io.BytesIO()
@@ -497,16 +409,14 @@ def build_pdf_from_combo_pngs(combo_pngs: list[bytes], paper: str) -> bytes:
     c.setAuthor("Fargeleggingsgenerator")
 
     for png_bytes in combo_pngs:
-        img = Image.open(io.BytesIO(png_bytes)).convert("RGB")  # IKKE grayscale
-
+        img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
         iw, ih = img.size
         scale = min(usable_w / iw, usable_h / ih)
         tw = iw * scale
         th = ih * scale
         dx = x0 + (usable_w - tw) / 2
         dy = y0 + (usable_h - th) / 2
-
-        c.drawImage(ImageReader(img), dx, dy, width=tw, height=th, mask="auto")
+        c.drawImage(pil_to_imagereader(img), dx, dy, width=tw, height=th, mask="auto")
         c.showPage()
 
     c.save()
@@ -515,7 +425,7 @@ def build_pdf_from_combo_pngs(combo_pngs: list[bytes], paper: str) -> bytes:
 
 
 def build_album_pdf(original_and_coloring: list[tuple[bytes, bytes]], paper: str) -> bytes:
-    """Album: Side 1 original (farger), Side 2 fargelegging (strek)."""
+    """Album: side 1 original (full side), side 2 fargelegging (full side) – robust image handling."""
     pagesize, (x0, y0, usable_w, usable_h) = _pdf_page_geometry(paper)
 
     def draw_fit(c, pil_img: Image.Image):
@@ -526,7 +436,7 @@ def build_album_pdf(original_and_coloring: list[tuple[bytes, bytes]], paper: str
         th = ih * scale
         dx = x0 + (usable_w - tw) / 2
         dy = y0 + (usable_h - th) / 2
-        c.drawImage(ImageReader(pil_img), dx, dy, width=tw, height=th, mask="auto")
+        c.drawImage(pil_to_imagereader(pil_img), dx, dy, width=tw, height=th, mask="auto")
 
     out = io.BytesIO()
     c = pdfcanvas.Canvas(out, pagesize=pagesize)
@@ -534,14 +444,13 @@ def build_album_pdf(original_and_coloring: list[tuple[bytes, bytes]], paper: str
     c.setAuthor("Fargeleggingsgenerator")
 
     for orig_bytes, col_bytes in original_and_coloring:
-        # Side 1: original (farger)
         orig = Image.open(io.BytesIO(orig_bytes))
         orig = ImageOps.exif_transpose(orig)
         draw_fit(c, orig)
         c.showPage()
 
-        # Side 2: fargeleggingsbilde (ikke grayscale, behold slik OpenAI leverer)
         col = Image.open(io.BytesIO(col_bytes))
+        col = ImageOps.exif_transpose(col)
         draw_fit(c, col)
         c.showPage()
 
@@ -605,7 +514,10 @@ def process():
 
     if mode == "booklet":
         paper = request.form.get("paper", "A4")
-        layout = request.form.get("layout", "combo")
+        # Default album (1 bilde per side) hvis frontend ikke sender layout
+        layout = request.form.get("layout", "album")
+
+        print("PDF request:", {"paper": paper, "layout": layout}, flush=True)
 
         files = request.files.getlist("booklet_images")
         files = [f for f in files if f and f.filename]
@@ -632,7 +544,7 @@ def process():
                     )
                 raise
 
-            # Komboside
+            # Komboside (for valgfritt layout)
             combined_png = combine_side_by_side_bytes(original_bytes, coloring_bytes)
             combo_pages.append(combined_png)
 
