@@ -1,18 +1,27 @@
 import base64
 import io
-import zipfile
 from datetime import datetime
 
 from flask import Flask, request, send_file, render_template_string
 from openai import OpenAI, BadRequestError
 from PIL import Image, ImageOps
 
+# PDF (ReportLab)
+from reportlab.pdfgen import canvas as pdfcanvas
+from reportlab.lib.pagesizes import A4, A5
+from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
+
 client = OpenAI()
 
-# Hvor mange bilder som tillates per kjøring (Render sliter over 1)
-MAX_FILES = 1
+# Maks antall bilder for enkeltbilde-modus (holdes 1)
+MAX_FILES_SINGLE = 1
 
-# Standard størrelse på hver "side" (original / fargelegging)
+# Maks antall bilder for hefte/PDF (MVP)
+BOOKLET_MIN = 2
+BOOKLET_MAX = 4
+
+# Standard størrelse på hver "side" som OpenAI genererer (fargeleggingsbildet)
 SIDE_WIDTH = 1024
 SIDE_HEIGHT = 1536
 IMAGE_SIZE_STR = f"{SIDE_WIDTH}x{SIDE_HEIGHT}"
@@ -40,9 +49,7 @@ HTML_PAGE = """
         font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         color: #0f172a;
       }
-      * {
-        box-sizing: border-box;
-      }
+      * { box-sizing: border-box; }
       body {
         margin: 0;
         padding: 2rem 1rem;
@@ -50,15 +57,12 @@ HTML_PAGE = """
         align-items: center;
         justify-content: center;
         min-height: 100vh;
-
-        /* Bakgrunnsbildet ditt */
         background-image: url('/static/background-kids.png');
         background-size: cover;
         background-position: center;
         background-repeat: no-repeat;
         background-attachment: fixed;
       }
-
       .card {
         background: rgba(255, 255, 255, 0.88);
         backdrop-filter: blur(10px);
@@ -68,17 +72,8 @@ HTML_PAGE = """
         max-width: 720px;
         width: 100%;
       }
-
-      h1 {
-        margin: 0 0 0.35rem 0;
-        font-size: 1.8rem;
-      }
-      .sub {
-        margin: 0 0 1.2rem 0;
-        color: #6b7280;
-        font-size: 0.95rem;
-        line-height: 1.5;
-      }
+      h1 { margin: 0 0 0.35rem 0; font-size: 1.8rem; }
+      .sub { margin: 0 0 1.2rem 0; color: #6b7280; font-size: 0.95rem; line-height: 1.5; }
 
       .dropzone {
         position: relative;
@@ -100,25 +95,14 @@ HTML_PAGE = """
         border-color: #4f46e5;
         box-shadow: 0 0 0 2px rgba(79,70,229,0.3);
       }
-
-      /* Filinput er "usynlig", men label-click åpner dialogen */
       .dropzone input[type="file"] {
         position: absolute;
         inset: 0;
         opacity: 0;
         cursor: pointer;
       }
-
-      .dropzone-title {
-        font-weight: 600;
-        margin-bottom: 0.3rem;
-        pointer-events: none;
-      }
-      .dropzone-sub {
-        font-size: 0.9rem;
-        color: #6b7280;
-        pointer-events: none;
-      }
+      .dropzone-title { font-weight: 600; margin-bottom: 0.3rem; pointer-events: none; }
+      .dropzone-sub { font-size: 0.9rem; color: #6b7280; pointer-events: none; }
 
       .file-list {
         margin: 0 0 1.0rem 0;
@@ -126,9 +110,7 @@ HTML_PAGE = """
         color: #4b5563;
         text-align: left;
       }
-      .file-list-empty {
-        color: #9ca3af;
-      }
+      .file-list-empty { color: #9ca3af; }
 
       .controls-row {
         display: flex;
@@ -161,21 +143,10 @@ HTML_PAGE = """
         cursor: pointer;
         white-space: nowrap;
       }
-      button:hover {
-        background: #4338ca;
-      }
-      .hint {
-        margin-top: 0.9rem;
-        font-size: 0.8rem;
-        color: #6b7280;
-      }
-      .footer {
-        margin-top: 1.2rem;
-        font-size: 0.75rem;
-        color: #9ca3af;
-      }
+      button:hover { background: #4338ca; }
+      .hint { margin-top: 0.9rem; font-size: 0.8rem; color: #6b7280; }
+      .footer { margin-top: 1.2rem; font-size: 0.75rem; color: #9ca3af; }
 
-      /* Overlay for "genererer..." */
       .overlay {
         position: fixed;
         inset: 0;
@@ -185,15 +156,13 @@ HTML_PAGE = """
         justify-content: center;
         z-index: 50;
       }
-      .overlay.hidden {
-        display: none;
-      }
+      .overlay.hidden { display: none; }
       .overlay-box {
         background: #ffffff;
         padding: 1.5rem 1.75rem;
         border-radius: 0.9rem;
         box-shadow: 0 18px 40px rgba(15,23,42,0.3);
-        max-width: 320px;
+        max-width: 360px;
         text-align: center;
         font-size: 0.95rem;
       }
@@ -206,26 +175,13 @@ HTML_PAGE = """
         animation: spin 0.9s linear infinite;
         margin: 0 auto 0.9rem auto;
       }
-      @keyframes spin {
-        to { transform: rotate(360deg); }
-      }
+      @keyframes spin { to { transform: rotate(360deg); } }
 
       @media (max-width: 600px) {
-        .card {
-          padding: 1.5rem 1.25rem;
-        }
-        .controls-row {
-          flex-direction: column;
-          align-items: stretch;
-        }
-        button {
-          width: 100%;
-          text-align: center;
-          justify-content: center;
-        }
-        .file-list {
-          text-align: center;
-        }
+        .card { padding: 1.5rem 1.25rem; }
+        .controls-row { flex-direction: column; align-items: stretch; }
+        button { width: 100%; text-align: center; justify-content: center; }
+        .file-list { text-align: center; }
       }
     </style>
   </head>
@@ -233,18 +189,58 @@ HTML_PAGE = """
     <div class="card">
       <h1>Fargeleggingsgenerator</h1>
       <p class="sub">
-        Last opp dine bilder og få det kombinert med et fargeleggingsark.
+        Last opp bilder og få et kombobilde (original + fargeleggingsark). Du kan også lage en PDF (2–4 sider) for utskrift.
       </p>
 
       <form id="form" action="/process" method="post" enctype="multipart/form-data">
-        <label class="dropzone" id="dropzone">
-          <input id="file-input" type="file" name="images" accept="image/*">
-          <div class="dropzone-title">Slipp ett bilde her</div>
-          <div class="dropzone-sub">eller klikk for å velge ett bilde</div>
-        </label>
 
-        <div id="file-list" class="file-list file-list-empty">
-          Ingen filer valgt ennå.
+        <fieldset style="border:none; padding:0; margin: 0 0 1rem 0;">
+          <div style="display:flex; gap:1rem; flex-wrap:wrap;">
+            <label class="control-group">
+              <input type="radio" name="mode" value="single" checked>
+              Enkeltbilde
+            </label>
+            <label class="control-group">
+              <input type="radio" name="mode" value="booklet">
+              Fargeleggingshefte (PDF)
+            </label>
+          </div>
+        </fieldset>
+
+        <!-- SINGLE -->
+        <div id="singleBox">
+          <label class="dropzone" id="dropzoneSingle">
+            <input id="file-input-single" type="file" name="images" accept="image/*">
+            <div class="dropzone-title">Slipp ett bilde her</div>
+            <div class="dropzone-sub">eller klikk for å velge ett bilde</div>
+          </label>
+
+          <div id="file-list-single" class="file-list file-list-empty">
+            Ingen filer valgt ennå.
+          </div>
+        </div>
+
+        <!-- BOOKLET -->
+        <div id="bookletBox" style="display:none;">
+          <label class="dropzone" id="dropzoneBooklet">
+            <input id="file-input-booklet" type="file" name="booklet_images" accept="image/*" multiple>
+            <div class="dropzone-title">Slipp 2–4 bilder her</div>
+            <div class="dropzone-sub">eller klikk for å velge flere bilder</div>
+          </label>
+
+          <div id="file-list-booklet" class="file-list file-list-empty">
+            Ingen filer valgt ennå.
+          </div>
+
+          <div class="controls-row" style="margin-bottom: 0.5rem;">
+            <div class="control-group">
+              <label for="paper">Format:</label>
+              <select name="paper" id="paper">
+                <option value="A4" selected>A4</option>
+                <option value="A5">A5</option>
+              </select>
+            </div>
+          </div>
         </div>
 
         <div class="controls-row">
@@ -256,10 +252,10 @@ HTML_PAGE = """
               <option value="detailed">Mer detaljer</option>
             </select>
           </div>
-          <button type="submit">Generer fargeleggingsark</button>
+          <button type="submit" id="submitBtn">Generer fargeleggingsark</button>
         </div>
 
-        <p class="hint">
+        <p class="hint" id="hintText">
           Foreløpig støttes ett bilde om gangen. Større opplastinger kan gjøre at serveren stopper.
         </p>
       </form>
@@ -269,79 +265,122 @@ HTML_PAGE = """
       </div>
     </div>
 
-    <!-- Overlay som vises mens generering pågår -->
     <div id="overlay" class="overlay hidden">
       <div class="overlay-box">
         <div class="loader"></div>
-        <div>Genererer fargeleggingsark …</div>
+        <div id="overlayText">Genererer …</div>
         <div style="font-size:0.8rem; color:#6b7280; margin-top:0.4rem;">
-          Dette kan ta opptil et par minutter.
+          Dette kan ta litt tid.
         </div>
       </div>
     </div>
 
     <script>
-      const dropzone = document.getElementById('dropzone');
-      const fileInput = document.getElementById('file-input');
-      const fileList = document.getElementById('file-list');
       const form = document.getElementById('form');
       const overlay = document.getElementById('overlay');
+      const overlayText = document.getElementById('overlayText');
 
-      function updateFileList(files) {
-        if (!files || files.length === 0) {
-          fileList.textContent = 'Ingen filer valgt ennå.';
-          fileList.classList.add('file-list-empty');
-          return;
-        }
-        fileList.classList.remove('file-list-empty');
+      const singleBox = document.getElementById('singleBox');
+      const bookletBox = document.getElementById('bookletBox');
+      const hintText = document.getElementById('hintText');
+      const submitBtn = document.getElementById('submitBtn');
 
-        // vi forventer maks 1 fil
-        fileList.textContent = `Valgt fil: ${files[0].name}`;
+      const singleInput = document.getElementById('file-input-single');
+      const bookletInput = document.getElementById('file-input-booklet');
+
+      const singleList = document.getElementById('file-list-single');
+      const bookletList = document.getElementById('file-list-booklet');
+
+      function setMode(mode) {
+        const isSingle = mode === 'single';
+        singleBox.style.display = isSingle ? 'block' : 'none';
+        bookletBox.style.display = isSingle ? 'none' : 'block';
+
+        submitBtn.textContent = isSingle ? 'Generer fargeleggingsark' : 'Generer PDF-hefte';
+        overlayText.textContent = isSingle ? 'Genererer fargeleggingsark …' : 'Genererer PDF-hefte …';
+
+        hintText.textContent = isSingle
+          ? 'Foreløpig støttes ett bilde om gangen. Større opplastinger kan gjøre at serveren stopper.'
+          : 'Heftet genereres som PDF (maks 4 bilder). Flere bilder = lengre ventetid.';
       }
 
-      fileInput.addEventListener('change', () => {
-        updateFileList(fileInput.files);
+      document.querySelectorAll('input[name="mode"]').forEach(r => {
+        r.addEventListener('change', () => {
+          const mode = document.querySelector('input[name="mode"]:checked').value;
+          setMode(mode);
+        });
       });
 
-      dropzone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        dropzone.classList.add('dragover');
-      });
-
-      dropzone.addEventListener('dragleave', () => {
-        dropzone.classList.remove('dragover');
-      });
-
-      dropzone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        dropzone.classList.remove('dragover');
-        const files = e.dataTransfer.files;
-        // tar bare første fil
-        if (files && files.length > 0) {
-          const dataTransfer = new DataTransfer();
-          dataTransfer.items.add(files[0]);
-          fileInput.files = dataTransfer.files;
-          updateFileList(fileInput.files);
+      function updateSingleList() {
+        const files = singleInput.files;
+        if (!files || files.length === 0) {
+          singleList.textContent = 'Ingen filer valgt ennå.';
+          singleList.classList.add('file-list-empty');
+          return;
         }
-      });
+        singleList.classList.remove('file-list-empty');
+        singleList.textContent = `Valgt fil: ${files[0].name}`;
+      }
 
-      // Vis overlay når vi sender inn skjemaet
+      function updateBookletList() {
+        const files = bookletInput.files;
+        if (!files || files.length === 0) {
+          bookletList.textContent = 'Ingen filer valgt ennå.';
+          bookletList.classList.add('file-list-empty');
+          return;
+        }
+        bookletList.classList.remove('file-list-empty');
+        bookletList.textContent = `Valgt ${files.length} filer`;
+      }
+
+      singleInput.addEventListener('change', updateSingleList);
+      bookletInput.addEventListener('change', updateBookletList);
+
+      // Drag & drop støtte for begge dropzones
+      function attachDnD(dropzoneEl, inputEl, updateFn, singleOnly=false) {
+        dropzoneEl.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          dropzoneEl.classList.add('dragover');
+        });
+        dropzoneEl.addEventListener('dragleave', () => {
+          dropzoneEl.classList.remove('dragover');
+        });
+        dropzoneEl.addEventListener('drop', (e) => {
+          e.preventDefault();
+          dropzoneEl.classList.remove('dragover');
+          const files = e.dataTransfer.files;
+          if (!files || files.length === 0) return;
+
+          const dt = new DataTransfer();
+          if (singleOnly) {
+            dt.items.add(files[0]);
+          } else {
+            for (const f of files) dt.items.add(f);
+          }
+          inputEl.files = dt.files;
+          updateFn();
+        });
+      }
+
+      attachDnD(document.getElementById('dropzoneSingle'), singleInput, updateSingleList, true);
+      attachDnD(document.getElementById('dropzoneBooklet'), bookletInput, updateBookletList, false);
+
+      // Overlay når vi sender inn
       let overlayTimeout = null;
       form.addEventListener('submit', () => {
         overlay.classList.remove('hidden');
-        // failsafe: skjul etter 5 minutter uansett
         if (overlayTimeout) clearTimeout(overlayTimeout);
-        overlayTimeout = setTimeout(() => {
-          overlay.classList.add('hidden');
-        }, 5 * 60 * 1000);
+        overlayTimeout = setTimeout(() => overlay.classList.add('hidden'), 5 * 60 * 1000);
       });
 
-      // Når vinduet får fokus igjen etter nedlasting, skjul overlay
       window.addEventListener('focus', () => {
         if (!overlay.classList.contains('hidden')) {
           setTimeout(() => overlay.classList.add('hidden'), 300);
         }
       });
+
+      // init
+      setMode('single');
     </script>
   </body>
 </html>
@@ -360,10 +399,8 @@ def build_prompt(detail_level: str) -> str:
 def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
     """Kaller OpenAI image-API og returnerer PNG-bytes for fargeleggingsbildet."""
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    # respekter EXIF-orientering (slik mobilen viser bildet)
     img = ImageOps.exif_transpose(img)
 
-    # nedskalere veldig store bilder for å spare minne og tid
     max_dim = 1600
     if max(img.size) > max_dim:
         img.thumbnail((max_dim, max_dim), Image.LANCZOS)
@@ -385,7 +422,6 @@ def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
             quality="high",
         )
     except BadRequestError as e:
-        # OpenAI safety/moderation blokkerte bildet
         if "moderation_blocked" in str(e):
             raise ValueError("moderation_blocked")
         raise
@@ -397,27 +433,71 @@ def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
 def combine_side_by_side_bytes(original_bytes: bytes, coloring_bytes: bytes) -> bytes:
     """Kombinerer original + fargeleggingsbilde og returnerer PNG-bytes."""
     orig = Image.open(io.BytesIO(original_bytes)).convert("RGB")
-    # EXIF-orientering på originalen i kombobildet
     orig = ImageOps.exif_transpose(orig)
 
     col = Image.open(io.BytesIO(coloring_bytes)).convert("RGB")
 
-    canvas = Image.new("RGB", (SIDE_WIDTH * 2, SIDE_HEIGHT), color=(255, 255, 255))
+    canvas_img = Image.new("RGB", (SIDE_WIDTH * 2, SIDE_HEIGHT), color=(255, 255, 255))
 
     def place_in_box(img: Image.Image, box_left: int):
         img_copy = img.copy()
         img_copy.thumbnail((SIDE_WIDTH, SIDE_HEIGHT), Image.LANCZOS)
         x_offset = box_left + (SIDE_WIDTH - img_copy.width) // 2
         y_offset = (SIDE_HEIGHT - img_copy.height) // 2
-        canvas.paste(img_copy, (x_offset, y_offset))
+        canvas_img.paste(img_copy, (x_offset, y_offset))
 
     place_in_box(orig, box_left=0)
     place_in_box(col, box_left=SIDE_WIDTH)
 
     out_buf = io.BytesIO()
-    canvas.save(out_buf, format="PNG")
+    canvas_img.save(out_buf, format="PNG")
     out_buf.seek(0)
     return out_buf.getvalue()
+
+
+def build_pdf_from_combo_pngs(combo_pngs: list[bytes], paper: str) -> bytes:
+    """Bygger PDF (A4/A5) fra ferdige kombobilde-PNGs. Returnerer PDF-bytes."""
+    if paper not in ("A4", "A5"):
+        paper = "A4"
+
+    pagesize = A4 if paper == "A4" else A5
+    page_w, page_h = pagesize
+
+    # Trykkvennlige marger (innbinding venstre)
+    inner = 20 * mm
+    outer = 12 * mm
+    top = 12 * mm
+    bottom = 15 * mm
+
+    x0 = inner
+    y0 = bottom
+    usable_w = page_w - inner - outer
+    usable_h = page_h - top - bottom
+
+    out = io.BytesIO()
+    c = pdfcanvas.Canvas(out, pagesize=pagesize)
+    c.setTitle("Fargeleggingshefte")
+    c.setAuthor("Fargeleggingsgenerator")
+
+    for png_bytes in combo_pngs:
+        img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+
+        # Valgfritt: gråskala for "trykkfølelse"
+        img = ImageOps.grayscale(img).convert("RGB")
+
+        iw, ih = img.size
+        scale = min(usable_w / iw, usable_h / ih)
+        tw = iw * scale
+        th = ih * scale
+        dx = x0 + (usable_w - tw) / 2
+        dy = y0 + (usable_h - th) / 2
+
+        c.drawImage(ImageReader(img), dx, dy, width=tw, height=th, mask="auto")
+        c.showPage()
+
+    c.save()
+    out.seek(0)
+    return out.getvalue()
 
 
 app = Flask(__name__)
@@ -430,26 +510,25 @@ def index():
 
 @app.route("/process", methods=["POST"])
 def process():
-    files = request.files.getlist("images")
-    if not files or files[0].filename == "":
-        return "Ingen filer lastet opp.", 400
-
-    # håndter for mange filer (burde egentlig ikke skje, siden UI bare lar deg velge ett)
-    if len(files) > MAX_FILES:
-        return (
-            f"På grunn av begrensninger i serveren kan du foreløpig bare laste opp "
-            f"{MAX_FILES} bilde om gangen.",
-            400,
-        )
-
+    mode = request.form.get("mode", "single")
     detail = request.form.get("detail", "normal")
 
-    results = []
+    if mode == "single":
+        files = request.files.getlist("images")
+        if not files or files[0].filename == "":
+            return "Ingen filer lastet opp.", 400
 
-    for file in files[:MAX_FILES]:
+        if len(files) > MAX_FILES_SINGLE:
+            return (
+                f"På grunn av begrensninger i serveren kan du foreløpig bare laste opp "
+                f"{MAX_FILES_SINGLE} bilde om gangen.",
+                400,
+            )
+
+        file = files[0]
         original_bytes = file.read()
         if not original_bytes:
-            continue
+            return "Ingen gyldige bilder.", 400
 
         try:
             coloring_bytes = generate_coloring_bytes(original_bytes, detail)
@@ -460,25 +539,65 @@ def process():
                     "Prøv et annet bilde (mer klær, nøytral setting, ingen sensitive situasjoner).",
                     400,
                 )
-            else:
-                raise
+            raise
 
         combined_png = combine_side_by_side_bytes(original_bytes, coloring_bytes)
 
         stem = (file.filename or "bilde").rsplit(".", 1)[0].replace(" ", "_")
-        results.append((f"{stem}_combo.png", combined_png))
+        name = f"{stem}_combo.png"
 
-    if not results:
-        return "Ingen gyldige bilder.", 400
+        return send_file(
+            io.BytesIO(combined_png),
+            mimetype="image/png",
+            as_attachment=True,
+            download_name=name,
+        )
 
-    # siden vi bare støtter ett bilde, blir dette alltid én fil
-    name, data = results[0]
-    return send_file(
-        io.BytesIO(data),
-        mimetype="image/png",
-        as_attachment=True,
-        download_name=name,
-    )
+    if mode == "booklet":
+        paper = request.form.get("paper", "A4")
+        files = request.files.getlist("booklet_images")
+        files = [f for f in files if f and f.filename]
+
+        if len(files) < BOOKLET_MIN or len(files) > BOOKLET_MAX:
+            return f"Last opp {BOOKLET_MIN}–{BOOKLET_MAX} bilder (du lastet opp {len(files)}).", 400
+
+        combo_pages: list[bytes] = []
+
+        for idx, file in enumerate(files, start=1):
+            original_bytes = file.read()
+            if not original_bytes:
+                continue
+
+            try:
+                coloring_bytes = generate_coloring_bytes(original_bytes, detail)
+            except ValueError as e:
+                if "moderation_blocked" in str(e):
+                    return (
+                        f"Et av bildene (#{idx}) ble stoppet av sikkerhetssystemet til OpenAI. "
+                        "Fjern det bildet og prøv igjen.",
+                        400,
+                    )
+                raise
+
+            combined_png = combine_side_by_side_bytes(original_bytes, coloring_bytes)
+            combo_pages.append(combined_png)
+
+        if not combo_pages:
+            return "Ingen gyldige bilder.", 400
+
+        pdf_bytes = build_pdf_from_combo_pngs(combo_pages, paper=paper)
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        filename = f"fargeleggingshefte_{paper}_{stamp}.pdf"
+
+        return send_file(
+            io.BytesIO(pdf_bytes),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=filename,
+        )
+
+    return "Ugyldig valg.", 400
 
 
 if __name__ == "__main__":
