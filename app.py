@@ -14,17 +14,18 @@ from reportlab.lib.utils import ImageReader
 
 client = OpenAI()
 
-# Maks antall bilder for enkeltbilde-modus (holdes 1)
+# --- Limits ---
 MAX_FILES_SINGLE = 1
-
-# Maks antall bilder for hefte/PDF (MVP)
 BOOKLET_MIN = 2
 BOOKLET_MAX = 4
 
-# Standard størrelse på hver "side" som OpenAI genererer (fargeleggingsbildet)
+# --- Image sizes ---
 SIDE_WIDTH = 1024
 SIDE_HEIGHT = 1536
 IMAGE_SIZE_STR = f"{SIDE_WIDTH}x{SIDE_HEIGHT}"
+
+# Downscale originals in album mode to avoid OOM on Render
+ALBUM_ORIG_MAX_DIM = 2200  # try 1600–2600 if you want
 
 BASE_PROMPT = """
 Convert this photo into a clean, black-and-white line drawing coloring page
@@ -314,7 +315,7 @@ def build_prompt(detail_level: str) -> str:
 
 
 def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
-    """Kaller OpenAI image-API og returnerer PNG-bytes for fargeleggingsbildet."""
+    """Calls OpenAI image API and returns PNG bytes for the coloring image."""
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img = ImageOps.exif_transpose(img)
 
@@ -348,7 +349,7 @@ def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
 
 
 def combine_side_by_side_bytes(original_bytes: bytes, coloring_bytes: bytes) -> bytes:
-    """Kombinerer original + fargeleggingsbilde og returnerer PNG-bytes."""
+    """Combine original + coloring image side-by-side and return PNG bytes."""
     orig = Image.open(io.BytesIO(original_bytes)).convert("RGB")
     orig = ImageOps.exif_transpose(orig)
 
@@ -373,7 +374,7 @@ def combine_side_by_side_bytes(original_bytes: bytes, coloring_bytes: bytes) -> 
 
 
 def pil_to_imagereader(img: Image.Image) -> ImageReader:
-    """Robust: gi ReportLab en PNG-buffer i stedet for en 'live' PIL Image."""
+    """Robust: hand ReportLab a PNG buffer rather than a live PIL image object."""
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     buf.seek(0)
@@ -386,7 +387,7 @@ def _pdf_page_geometry(paper: str):
     pagesize = A4 if paper == "A4" else A5
     page_w, page_h = pagesize
 
-    # Marger (innbinding venstre)
+    # Margins (binding-left friendly)
     inner = 20 * mm
     outer = 12 * mm
     top = 12 * mm
@@ -399,8 +400,19 @@ def _pdf_page_geometry(paper: str):
     return pagesize, (x0, y0, usable_w, usable_h)
 
 
-def build_pdf_from_combo_pngs(combo_pngs: list[bytes], paper: str) -> bytes:
-    """Kombosider: én side per bilde (original venstre + fargelegging høyre)."""
+def _draw_fit(c, pil_img: Image.Image, x0: float, y0: float, usable_w: float, usable_h: float):
+    pil_img = pil_img.convert("RGB")
+    iw, ih = pil_img.size
+    scale = min(usable_w / iw, usable_h / ih)
+    tw = iw * scale
+    th = ih * scale
+    dx = x0 + (usable_w - tw) / 2
+    dy = y0 + (usable_h - th) / 2
+    c.drawImage(pil_to_imagereader(pil_img), dx, dy, width=tw, height=th, mask="auto")
+
+
+def build_pdf_combo_from_files(files, paper: str, detail: str) -> bytes:
+    """Combo mode: generate coloring, build combo PNG per file, then add to PDF."""
     pagesize, (x0, y0, usable_w, usable_h) = _pdf_page_geometry(paper)
 
     out = io.BytesIO()
@@ -408,15 +420,21 @@ def build_pdf_from_combo_pngs(combo_pngs: list[bytes], paper: str) -> bytes:
     c.setTitle("Fargeleggingshefte (Kombosider)")
     c.setAuthor("Fargeleggingsgenerator")
 
-    for png_bytes in combo_pngs:
-        img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
-        iw, ih = img.size
-        scale = min(usable_w / iw, usable_h / ih)
-        tw = iw * scale
-        th = ih * scale
-        dx = x0 + (usable_w - tw) / 2
-        dy = y0 + (usable_h - th) / 2
-        c.drawImage(pil_to_imagereader(img), dx, dy, width=tw, height=th, mask="auto")
+    for idx, file in enumerate(files, start=1):
+        original_bytes = file.read()
+        if not original_bytes:
+            continue
+
+        try:
+            coloring_bytes = generate_coloring_bytes(original_bytes, detail)
+        except ValueError as e:
+            if "moderation_blocked" in str(e):
+                raise ValueError(f"moderation_blocked_{idx}")
+            raise
+
+        combined_png = combine_side_by_side_bytes(original_bytes, coloring_bytes)
+        img = Image.open(io.BytesIO(combined_png)).convert("RGB")
+        _draw_fit(c, img, x0, y0, usable_w, usable_h)
         c.showPage()
 
     c.save()
@@ -424,34 +442,45 @@ def build_pdf_from_combo_pngs(combo_pngs: list[bytes], paper: str) -> bytes:
     return out.getvalue()
 
 
-def build_album_pdf(original_and_coloring: list[tuple[bytes, bytes]], paper: str) -> bytes:
-    """Album: side 1 original (full side), side 2 fargelegging (full side) – robust image handling."""
+def build_pdf_album_from_files(files, paper: str, detail: str) -> bytes:
+    """
+    Album mode (streaming):
+    For each file:
+      - page 1: original (downscaled to avoid OOM)
+      - page 2: coloring (OpenAI output)
+    No large lists kept in memory.
+    """
     pagesize, (x0, y0, usable_w, usable_h) = _pdf_page_geometry(paper)
-
-    def draw_fit(c, pil_img: Image.Image):
-        pil_img = pil_img.convert("RGB")
-        iw, ih = pil_img.size
-        scale = min(usable_w / iw, usable_h / ih)
-        tw = iw * scale
-        th = ih * scale
-        dx = x0 + (usable_w - tw) / 2
-        dy = y0 + (usable_h - th) / 2
-        c.drawImage(pil_to_imagereader(pil_img), dx, dy, width=tw, height=th, mask="auto")
 
     out = io.BytesIO()
     c = pdfcanvas.Canvas(out, pagesize=pagesize)
     c.setTitle("Fargeleggingshefte (Album)")
     c.setAuthor("Fargeleggingsgenerator")
 
-    for orig_bytes, col_bytes in original_and_coloring:
-        orig = Image.open(io.BytesIO(orig_bytes))
+    for idx, file in enumerate(files, start=1):
+        original_bytes = file.read()
+        if not original_bytes:
+            continue
+
+        # Page 1: original (downscale)
+        orig = Image.open(io.BytesIO(original_bytes))
         orig = ImageOps.exif_transpose(orig)
-        draw_fit(c, orig)
+        if max(orig.size) > ALBUM_ORIG_MAX_DIM:
+            orig.thumbnail((ALBUM_ORIG_MAX_DIM, ALBUM_ORIG_MAX_DIM), Image.LANCZOS)
+        _draw_fit(c, orig, x0, y0, usable_w, usable_h)
         c.showPage()
 
-        col = Image.open(io.BytesIO(col_bytes))
+        # Page 2: coloring
+        try:
+            coloring_bytes = generate_coloring_bytes(original_bytes, detail)
+        except ValueError as e:
+            if "moderation_blocked" in str(e):
+                raise ValueError(f"moderation_blocked_{idx}")
+            raise
+
+        col = Image.open(io.BytesIO(coloring_bytes))
         col = ImageOps.exif_transpose(col)
-        draw_fit(c, col)
+        _draw_fit(c, col, x0, y0, usable_w, usable_h)
         c.showPage()
 
     c.save()
@@ -478,11 +507,7 @@ def process():
             return "Ingen filer lastet opp.", 400
 
         if len(files) > MAX_FILES_SINGLE:
-            return (
-                f"På grunn av begrensninger i serveren kan du foreløpig bare laste opp "
-                f"{MAX_FILES_SINGLE} bilde om gangen.",
-                400,
-            )
+            return f"På grunn av begrensninger i serveren kan du foreløpig bare laste opp {MAX_FILES_SINGLE} bilde om gangen.", 400
 
         file = files[0]
         original_bytes = file.read()
@@ -501,23 +526,14 @@ def process():
             raise
 
         combined_png = combine_side_by_side_bytes(original_bytes, coloring_bytes)
-
         stem = (file.filename or "bilde").rsplit(".", 1)[0].replace(" ", "_")
         name = f"{stem}_combo.png"
 
-        return send_file(
-            io.BytesIO(combined_png),
-            mimetype="image/png",
-            as_attachment=True,
-            download_name=name,
-        )
+        return send_file(io.BytesIO(combined_png), mimetype="image/png", as_attachment=True, download_name=name)
 
     if mode == "booklet":
         paper = request.form.get("paper", "A4")
-        # Default album (1 bilde per side) hvis frontend ikke sender layout
-        layout = request.form.get("layout", "album")
-
-        print("PDF request:", {"paper": paper, "layout": layout}, flush=True)
+        layout = request.form.get("layout", "album")  # default album
 
         files = request.files.getlist("booklet_images")
         files = [f for f in files if f and f.filename]
@@ -525,51 +541,24 @@ def process():
         if len(files) < BOOKLET_MIN or len(files) > BOOKLET_MAX:
             return f"Last opp {BOOKLET_MIN}–{BOOKLET_MAX} bilder (du lastet opp {len(files)}).", 400
 
-        combo_pages: list[bytes] = []
-        original_and_coloring: list[tuple[bytes, bytes]] = []
+        print("PDF request:", {"paper": paper, "layout": layout, "count": len(files)}, flush=True)
 
-        for idx, file in enumerate(files, start=1):
-            original_bytes = file.read()
-            if not original_bytes:
-                continue
-
-            try:
-                coloring_bytes = generate_coloring_bytes(original_bytes, detail)
-            except ValueError as e:
-                if "moderation_blocked" in str(e):
-                    return (
-                        f"Et av bildene (#{idx}) ble stoppet av sikkerhetssystemet til OpenAI. "
-                        "Fjern det bildet og prøv igjen.",
-                        400,
-                    )
-                raise
-
-            # Komboside (for valgfritt layout)
-            combined_png = combine_side_by_side_bytes(original_bytes, coloring_bytes)
-            combo_pages.append(combined_png)
-
-            # Album-sider
-            original_and_coloring.append((original_bytes, coloring_bytes))
-
-        if not combo_pages:
-            return "Ingen gyldige bilder.", 400
-
-        if layout == "album":
-            pdf_bytes = build_album_pdf(original_and_coloring, paper=paper)
-            title = "album"
-        else:
-            pdf_bytes = build_pdf_from_combo_pngs(combo_pages, paper=paper)
-            title = "combo"
+        try:
+            if layout == "combo":
+                pdf_bytes = build_pdf_combo_from_files(files, paper=paper, detail=detail)
+                title = "combo"
+            else:
+                pdf_bytes = build_pdf_album_from_files(files, paper=paper, detail=detail)
+                title = "album"
+        except ValueError as e:
+            if "moderation_blocked_" in str(e):
+                return "Et av bildene ble stoppet av sikkerhetssystemet til OpenAI. Fjern det bildet og prøv igjen.", 400
+            raise
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M")
         filename = f"fargeleggingshefte_{title}_{paper}_{stamp}.pdf"
 
-        return send_file(
-            io.BytesIO(pdf_bytes),
-            mimetype="application/pdf",
-            as_attachment=True,
-            download_name=filename,
-        )
+        return send_file(io.BytesIO(pdf_bytes), mimetype="application/pdf", as_attachment=True, download_name=filename)
 
     return "Ugyldig valg.", 400
 
