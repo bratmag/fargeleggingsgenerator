@@ -1,5 +1,7 @@
 import base64
 import io
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from flask import Flask, request, send_file, render_template_string
@@ -19,13 +21,16 @@ MAX_FILES_SINGLE = 1
 BOOKLET_MIN = 2
 BOOKLET_MAX = 4
 
+# Parallel OpenAI calls for booklet mode
+MAX_PARALLEL_WORKERS = 4  # keep <= BOOKLET_MAX
+
 # --- Image sizes ---
 SIDE_WIDTH = 1024
 SIDE_HEIGHT = 1536
 IMAGE_SIZE_STR = f"{SIDE_WIDTH}x{SIDE_HEIGHT}"
 
 # Downscale originals in album mode to avoid OOM on Render
-ALBUM_ORIG_MAX_DIM = 2200  # try 1600–2600 if you want
+ALBUM_ORIG_MAX_DIM = 2200  # try 1600–2600 if needed
 
 BASE_PROMPT = """
 Convert this photo into a clean, black-and-white line drawing coloring page
@@ -330,6 +335,7 @@ def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
 
     prompt = build_prompt(detail_level)
 
+    start = time.time()
     try:
         result = client.images.edit(
             model="gpt-image-1",
@@ -343,9 +349,41 @@ def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
         if "moderation_blocked" in str(e):
             raise ValueError("moderation_blocked")
         raise
+    print(f"OpenAI image generation tok {time.time() - start:.1f} sek", flush=True)
 
     image_base64 = result.data[0].b64_json
     return base64.b64decode(image_base64)
+
+
+def generate_coloring_batch_parallel(original_bytes_list: list[bytes], detail: str) -> list[bytes]:
+    """
+    Generate coloring images in parallel and preserve original order.
+    Raises ValueError('moderation_blocked_<idx>') if one image is blocked.
+    """
+    batch_start = time.time()
+    results: list[bytes | None] = [None] * len(original_bytes_list)
+
+    max_workers = min(MAX_PARALLEL_WORKERS, len(original_bytes_list))
+    print(f"Starter parallell OpenAI-generering: {len(original_bytes_list)} bilder, workers={max_workers}", flush=True)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_idx = {
+            executor.submit(generate_coloring_bytes, image_bytes, detail): idx
+            for idx, image_bytes in enumerate(original_bytes_list)
+        }
+
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+                print(f"Parallelt bilde {idx + 1} ferdig", flush=True)
+            except ValueError as e:
+                if "moderation_blocked" in str(e):
+                    raise ValueError(f"moderation_blocked_{idx + 1}")
+                raise
+
+    print(f"Parallell batch ferdig på {time.time() - batch_start:.1f} sek", flush=True)
+    return [r for r in results if r is not None]
 
 
 def combine_side_by_side_bytes(original_bytes: bytes, coloring_bytes: bytes) -> bytes:
@@ -411,8 +449,8 @@ def _draw_fit(c, pil_img: Image.Image, x0: float, y0: float, usable_w: float, us
     c.drawImage(pil_to_imagereader(pil_img), dx, dy, width=tw, height=th, mask="auto")
 
 
-def build_pdf_combo_from_files(files, paper: str, detail: str) -> bytes:
-    """Combo mode: generate coloring, build combo PNG per file, then add to PDF."""
+def build_pdf_combo_from_pairs(original_bytes_list: list[bytes], coloring_bytes_list: list[bytes], paper: str) -> bytes:
+    """Combo mode: one page per image (original left + coloring right)."""
     pagesize, (x0, y0, usable_w, usable_h) = _pdf_page_geometry(paper)
 
     out = io.BytesIO()
@@ -420,35 +458,24 @@ def build_pdf_combo_from_files(files, paper: str, detail: str) -> bytes:
     c.setTitle("Fargeleggingshefte (Kombosider)")
     c.setAuthor("Fargeleggingsgenerator")
 
-    for idx, file in enumerate(files, start=1):
-        original_bytes = file.read()
-        if not original_bytes:
-            continue
-
-        try:
-            coloring_bytes = generate_coloring_bytes(original_bytes, detail)
-        except ValueError as e:
-            if "moderation_blocked" in str(e):
-                raise ValueError(f"moderation_blocked_{idx}")
-            raise
-
+    for idx, (original_bytes, coloring_bytes) in enumerate(zip(original_bytes_list, coloring_bytes_list), start=1):
+        combo_start = time.time()
         combined_png = combine_side_by_side_bytes(original_bytes, coloring_bytes)
         img = Image.open(io.BytesIO(combined_png)).convert("RGB")
         _draw_fit(c, img, x0, y0, usable_w, usable_h)
         c.showPage()
+        print(f"Komboside {idx} bygget på {time.time() - combo_start:.1f} sek", flush=True)
 
     c.save()
     out.seek(0)
     return out.getvalue()
 
 
-def build_pdf_album_from_files(files, paper: str, detail: str) -> bytes:
+def build_pdf_album_from_pairs(original_bytes_list: list[bytes], coloring_bytes_list: list[bytes], paper: str) -> bytes:
     """
-    Album mode (streaming):
-    For each file:
+    Album mode:
       - page 1: original (downscaled to avoid OOM)
-      - page 2: coloring (OpenAI output)
-    No large lists kept in memory.
+      - page 2: coloring
     """
     pagesize, (x0, y0, usable_w, usable_h) = _pdf_page_geometry(paper)
 
@@ -457,12 +484,9 @@ def build_pdf_album_from_files(files, paper: str, detail: str) -> bytes:
     c.setTitle("Fargeleggingshefte (Album)")
     c.setAuthor("Fargeleggingsgenerator")
 
-    for idx, file in enumerate(files, start=1):
-        original_bytes = file.read()
-        if not original_bytes:
-            continue
+    for idx, (original_bytes, coloring_bytes) in enumerate(zip(original_bytes_list, coloring_bytes_list), start=1):
+        pair_start = time.time()
 
-        # Page 1: original (downscale)
         orig = Image.open(io.BytesIO(original_bytes))
         orig = ImageOps.exif_transpose(orig)
         if max(orig.size) > ALBUM_ORIG_MAX_DIM:
@@ -470,18 +494,12 @@ def build_pdf_album_from_files(files, paper: str, detail: str) -> bytes:
         _draw_fit(c, orig, x0, y0, usable_w, usable_h)
         c.showPage()
 
-        # Page 2: coloring
-        try:
-            coloring_bytes = generate_coloring_bytes(original_bytes, detail)
-        except ValueError as e:
-            if "moderation_blocked" in str(e):
-                raise ValueError(f"moderation_blocked_{idx}")
-            raise
-
         col = Image.open(io.BytesIO(coloring_bytes))
         col = ImageOps.exif_transpose(col)
         _draw_fit(c, col, x0, y0, usable_w, usable_h)
         c.showPage()
+
+        print(f"Bildepar {idx} ferdig på {time.time() - pair_start:.1f} sek", flush=True)
 
     c.save()
     out.seek(0)
@@ -498,6 +516,7 @@ def index():
 
 @app.route("/process", methods=["POST"])
 def process():
+    request_start = time.time()
     mode = request.form.get("mode", "single")
     detail = request.form.get("detail", "normal")
 
@@ -529,6 +548,7 @@ def process():
         stem = (file.filename or "bilde").rsplit(".", 1)[0].replace(" ", "_")
         name = f"{stem}_combo.png"
 
+        print(f"Hele request tok {time.time() - request_start:.1f} sek", flush=True)
         return send_file(io.BytesIO(combined_png), mimetype="image/png", as_attachment=True, download_name=name)
 
     if mode == "booklet":
@@ -543,21 +563,36 @@ def process():
 
         print("PDF request:", {"paper": paper, "layout": layout, "count": len(files)}, flush=True)
 
+        # Read all files once up front so we can parallelize safely
+        originals_with_names: list[tuple[str, bytes]] = []
+        for file in files:
+            original_bytes = file.read()
+            if original_bytes:
+                originals_with_names.append((file.filename or "bilde", original_bytes))
+
+        if len(originals_with_names) < BOOKLET_MIN:
+            return "Ingen gyldige bilder.", 400
+
+        original_bytes_list = [b for _, b in originals_with_names]
+
         try:
-            if layout == "combo":
-                pdf_bytes = build_pdf_combo_from_files(files, paper=paper, detail=detail)
-                title = "combo"
-            else:
-                pdf_bytes = build_pdf_album_from_files(files, paper=paper, detail=detail)
-                title = "album"
+            coloring_bytes_list = generate_coloring_batch_parallel(original_bytes_list, detail)
         except ValueError as e:
             if "moderation_blocked_" in str(e):
                 return "Et av bildene ble stoppet av sikkerhetssystemet til OpenAI. Fjern det bildet og prøv igjen.", 400
             raise
 
+        if layout == "combo":
+            pdf_bytes = build_pdf_combo_from_pairs(original_bytes_list, coloring_bytes_list, paper=paper)
+            title = "combo"
+        else:
+            pdf_bytes = build_pdf_album_from_pairs(original_bytes_list, coloring_bytes_list, paper=paper)
+            title = "album"
+
         stamp = datetime.now().strftime("%Y%m%d_%H%M")
         filename = f"fargeleggingshefte_{title}_{paper}_{stamp}.pdf"
 
+        print(f"Hele request tok {time.time() - request_start:.1f} sek", flush=True)
         return send_file(io.BytesIO(pdf_bytes), mimetype="application/pdf", as_attachment=True, download_name=filename)
 
     return "Ugyldig valg.", 400
