@@ -212,7 +212,7 @@ HTML_PAGE = """
         </div>
 
         <p class="hint" id="hintText">
-          Foreløpig støttes ett bilde om gangen. Større opplastinger kan gjøre at serveren stopper.
+          Last opp ett bilde for kombobilde.
         </p>
       </form>
 
@@ -245,17 +245,28 @@ HTML_PAGE = """
       const singleList = document.getElementById('file-list-single');
       const bookletList = document.getElementById('file-list-booklet');
 
+      const paperSelect = document.getElementById('paper');
+      const layoutRadios = document.querySelectorAll('input[name="layout"]');
+
       function setMode(mode) {
         const isSingle = mode === 'single';
+
         singleBox.style.display = isSingle ? 'block' : 'none';
         bookletBox.style.display = isSingle ? 'none' : 'block';
+
+        // Ikke bruk required på filfeltene.
+        // Kun disable inaktiv modus.
+        singleInput.disabled = !isSingle;
+        bookletInput.disabled = isSingle;
+        paperSelect.disabled = isSingle;
+        layoutRadios.forEach(r => r.disabled = isSingle);
 
         submitBtn.textContent = isSingle ? 'Generer fargeleggingsark' : 'Generer PDF';
         overlayText.textContent = isSingle ? 'Genererer fargeleggingsark …' : 'Genererer PDF …';
 
         hintText.textContent = isSingle
-          ? 'Foreløpig støttes ett bilde om gangen. Større opplastinger kan gjøre at serveren stopper.'
-          : 'PDF: maks 4 bilder. Album gir 1 bilde per side.';
+          ? 'Last opp ett bilde for kombobilde.'
+          : 'PDF: last opp 2–4 bilder. Album gir 1 bilde per side.';
       }
 
       document.querySelectorAll('input[name="mode"]').forEach(r => {
@@ -291,16 +302,28 @@ HTML_PAGE = """
       bookletInput.addEventListener('change', updateBookletList);
 
       function attachDnD(dropzoneEl, inputEl, updateFn, singleOnly=false) {
-        dropzoneEl.addEventListener('dragover', (e) => { e.preventDefault(); dropzoneEl.classList.add('dragover'); });
-        dropzoneEl.addEventListener('dragleave', () => { dropzoneEl.classList.remove('dragover'); });
+        dropzoneEl.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          dropzoneEl.classList.add('dragover');
+        });
+
+        dropzoneEl.addEventListener('dragleave', () => {
+          dropzoneEl.classList.remove('dragover');
+        });
+
         dropzoneEl.addEventListener('drop', (e) => {
           e.preventDefault();
           dropzoneEl.classList.remove('dragover');
+
           const files = e.dataTransfer.files;
           if (!files || files.length === 0) return;
+
           const dt = new DataTransfer();
-          if (singleOnly) dt.items.add(files[0]);
-          else for (const f of files) dt.items.add(f);
+          if (singleOnly) {
+            dt.items.add(files[0]);
+          } else {
+            for (const f of files) dt.items.add(f);
+          }
           inputEl.files = dt.files;
           updateFn();
         });
@@ -311,13 +334,18 @@ HTML_PAGE = """
 
       let overlayTimeout = null;
       form.addEventListener('submit', () => {
+        const mode = document.querySelector('input[name="mode"]:checked').value;
+        console.log('Submitting mode:', mode);
+
         overlay.classList.remove('hidden');
         if (overlayTimeout) clearTimeout(overlayTimeout);
         overlayTimeout = setTimeout(() => overlay.classList.add('hidden'), 10 * 60 * 1000);
       });
 
       window.addEventListener('focus', () => {
-        if (!overlay.classList.contains('hidden')) setTimeout(() => overlay.classList.add('hidden'), 300);
+        if (!overlay.classList.contains('hidden')) {
+          setTimeout(() => overlay.classList.add('hidden'), 300);
+        }
       });
 
       setMode('single');
@@ -383,11 +411,14 @@ def prepare_image_variants(image_bytes: bytes, filename: str) -> PreparedImage:
     if max(openai_img.size) > OPENAI_INPUT_MAX_DIM:
         openai_img.thumbnail((OPENAI_INPUT_MAX_DIM, OPENAI_INPUT_MAX_DIM), Image.LANCZOS)
     openai_input_bytes = image_to_jpeg_bytes(openai_img, quality=88)
+    openai_img.close()
 
     pdf_img = base_img.copy()
     if max(pdf_img.size) > PDF_IMAGE_MAX_DIM:
         pdf_img.thumbnail((PDF_IMAGE_MAX_DIM, PDF_IMAGE_MAX_DIM), Image.LANCZOS)
     pdf_bytes = image_to_jpeg_bytes(pdf_img, quality=90)
+    pdf_img.close()
+    base_img.close()
 
     print(
         f"Preprocess '{filename}': orig={len(image_bytes)/1024:.0f}KB, "
@@ -517,6 +548,7 @@ def combine_side_by_side_bytes(original_pdf_bytes: bytes, coloring_bytes: bytes)
         x_offset = box_left + (SIDE_WIDTH - img_copy.width) // 2
         y_offset = (SIDE_HEIGHT - img_copy.height) // 2
         canvas_img.paste(img_copy, (x_offset, y_offset))
+        img_copy.close()
 
     place_in_box(orig, box_left=0)
     place_in_box(col, box_left=SIDE_WIDTH)
@@ -524,6 +556,11 @@ def combine_side_by_side_bytes(original_pdf_bytes: bytes, coloring_bytes: bytes)
     out_buf = io.BytesIO()
     canvas_img.save(out_buf, format="PNG")
     out_buf.seek(0)
+
+    orig.close()
+    col.close()
+    canvas_img.close()
+
     return out_buf.getvalue()
 
 
@@ -612,6 +649,9 @@ def build_pdf_combo_direct_from_pairs(
         _draw_fit_in_box(c, col, right_x, y0, half_w, usable_h)
         c.showPage()
 
+        orig.close()
+        col.close()
+
         print(f"Komboside {idx} direkte i PDF på {time.time() - page_start:.1f} sek", flush=True)
 
     c.save()
@@ -638,10 +678,12 @@ def build_pdf_album_from_pairs(
         orig = pil_image_from_bytes(original_pdf_bytes)
         _draw_fit(c, orig, x0, y0, usable_w, usable_h)
         c.showPage()
+        orig.close()
 
         col = pil_image_from_bytes(coloring_bytes)
         _draw_fit(c, col, x0, y0, usable_w, usable_h)
         c.showPage()
+        col.close()
 
         print(f"Bildepar {idx} ferdig på {time.time() - pair_start:.1f} sek", flush=True)
 
@@ -650,45 +692,21 @@ def build_pdf_album_from_pairs(
     return out.getvalue()
 
 
-def read_single_upload() -> tuple[str, bytes]:
-    files = request.files.getlist("images")
-    if not files or files[0].filename == "":
+def handle_single_mode(detail: str, single_files):
+    if not single_files or single_files[0].filename == "":
         raise ValueError("Ingen filer lastet opp.")
 
-    if len(files) > MAX_FILES_SINGLE:
+    if len(single_files) > MAX_FILES_SINGLE:
         raise ValueError(
             f"På grunn av begrensninger i serveren kan du foreløpig bare laste opp {MAX_FILES_SINGLE} bilde om gangen."
         )
 
-    file = files[0]
+    file = single_files[0]
     original_bytes = file.read()
     if not original_bytes:
         raise ValueError("Ingen gyldige bilder.")
 
-    return file.filename or "bilde", original_bytes
-
-
-def read_booklet_uploads() -> list[tuple[str, bytes]]:
-    files = request.files.getlist("booklet_images")
-    files = [f for f in files if f and f.filename]
-
-    if len(files) < BOOKLET_MIN or len(files) > BOOKLET_MAX:
-        raise ValueError(f"Last opp {BOOKLET_MIN}–{BOOKLET_MAX} bilder (du lastet opp {len(files)}).")
-
-    originals_with_names: list[tuple[str, bytes]] = []
-    for file in files:
-        original_bytes = file.read()
-        if original_bytes:
-            originals_with_names.append((file.filename or "bilde", original_bytes))
-
-    if len(originals_with_names) < BOOKLET_MIN:
-        raise ValueError("Ingen gyldige bilder.")
-
-    return originals_with_names
-
-
-def handle_single_mode(detail: str):
-    filename, original_bytes = read_single_upload()
+    filename = file.filename or "bilde"
     prepared = prepare_image_variants(original_bytes, filename)
 
     try:
@@ -714,11 +732,21 @@ def handle_single_mode(detail: str):
     )
 
 
-def handle_booklet_mode(detail: str):
+def handle_booklet_mode(detail: str, booklet_files):
     paper = request.form.get("paper", "A4")
     layout = request.form.get("layout", "album")
 
-    originals_with_names = read_booklet_uploads()
+    if len(booklet_files) < BOOKLET_MIN or len(booklet_files) > BOOKLET_MAX:
+        raise ValueError(f"Last opp {BOOKLET_MIN}–{BOOKLET_MAX} bilder (du lastet opp {len(booklet_files)}).")
+
+    originals_with_names: list[tuple[str, bytes]] = []
+    for file in booklet_files:
+        original_bytes = file.read()
+        if original_bytes:
+            originals_with_names.append((file.filename or "bilde", original_bytes))
+
+    if len(originals_with_names) < BOOKLET_MIN:
+        raise ValueError("Ingen gyldige bilder.")
 
     print("PDF request:", {"paper": paper, "layout": layout, "count": len(originals_with_names)}, flush=True)
 
@@ -777,14 +805,32 @@ def index():
 @app.route("/process", methods=["POST"])
 def process():
     request_start = time.time()
-    mode = request.form.get("mode", "single")
+
+    form_mode = request.form.get("mode", "single")
     detail = request.form.get("detail", "normal")
+
+    single_files = [f for f in request.files.getlist("images") if f and f.filename]
+    booklet_files = [f for f in request.files.getlist("booklet_images") if f and f.filename]
+
+    # Robust modedeteksjon basert på hva som faktisk ble sendt inn
+    if single_files and not booklet_files:
+        mode = "single"
+    elif booklet_files and not single_files:
+        mode = "booklet"
+    else:
+        mode = form_mode
+
+    print(
+        f"Mode fra skjema: {form_mode} | tolket mode: {mode} | "
+        f"single_files={len(single_files)} | booklet_files={len(booklet_files)}",
+        flush=True,
+    )
 
     try:
         if mode == "single":
-            response = handle_single_mode(detail)
+            response = handle_single_mode(detail, single_files)
         elif mode == "booklet":
-            response = handle_booklet_mode(detail)
+            response = handle_booklet_mode(detail, booklet_files)
         else:
             return "Ugyldig valg.", 400
 
