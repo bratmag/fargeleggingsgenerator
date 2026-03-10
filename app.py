@@ -30,7 +30,7 @@ SIDE_HEIGHT = 1536
 IMAGE_SIZE_STR = f"{SIDE_WIDTH}x{SIDE_HEIGHT}"
 
 # Downscale originals in album mode to avoid OOM on Render
-ALBUM_ORIG_MAX_DIM = 2200  # try 1600–2600 if needed
+ALBUM_ORIG_MAX_DIM = 2200
 
 BASE_PROMPT = """
 Convert this photo into a clean, black-and-white line drawing coloring page
@@ -356,10 +356,7 @@ def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
 
 
 def generate_coloring_batch_parallel(original_bytes_list: list[bytes], detail: str) -> list[bytes]:
-    """
-    Generate coloring images in parallel and preserve original order.
-    Raises ValueError('moderation_blocked_<idx>') if one image is blocked.
-    """
+    """Generate coloring images in parallel and preserve original order."""
     batch_start = time.time()
     results: list[bytes | None] = [None] * len(original_bytes_list)
 
@@ -387,7 +384,7 @@ def generate_coloring_batch_parallel(original_bytes_list: list[bytes], detail: s
 
 
 def combine_side_by_side_bytes(original_bytes: bytes, coloring_bytes: bytes) -> bytes:
-    """Combine original + coloring image side-by-side and return PNG bytes."""
+    """Used only for single-image PNG mode."""
     orig = Image.open(io.BytesIO(original_bytes)).convert("RGB")
     orig = ImageOps.exif_transpose(orig)
 
@@ -412,7 +409,6 @@ def combine_side_by_side_bytes(original_bytes: bytes, coloring_bytes: bytes) -> 
 
 
 def pil_to_imagereader(img: Image.Image) -> ImageReader:
-    """Robust: hand ReportLab a PNG buffer rather than a live PIL image object."""
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     buf.seek(0)
@@ -435,7 +431,7 @@ def _pdf_page_geometry(paper: str):
     y0 = bottom
     usable_w = page_w - inner - outer
     usable_h = page_h - top - bottom
-    return pagesize, (x0, y0, usable_w, usable_h)
+    return pagesize, page_w, page_h, (x0, y0, usable_w, usable_h)
 
 
 def _draw_fit(c, pil_img: Image.Image, x0: float, y0: float, usable_w: float, usable_h: float):
@@ -449,9 +445,29 @@ def _draw_fit(c, pil_img: Image.Image, x0: float, y0: float, usable_w: float, us
     c.drawImage(pil_to_imagereader(pil_img), dx, dy, width=tw, height=th, mask="auto")
 
 
-def build_pdf_combo_from_pairs(original_bytes_list: list[bytes], coloring_bytes_list: list[bytes], paper: str) -> bytes:
-    """Combo mode: one page per image (original left + coloring right)."""
-    pagesize, (x0, y0, usable_w, usable_h) = _pdf_page_geometry(paper)
+def _draw_fit_in_box(c, pil_img: Image.Image, box_x: float, box_y: float, box_w: float, box_h: float):
+    pil_img = pil_img.convert("RGB")
+    iw, ih = pil_img.size
+    scale = min(box_w / iw, box_h / ih)
+    tw = iw * scale
+    th = ih * scale
+    dx = box_x + (box_w - tw) / 2
+    dy = box_y + (box_h - th) / 2
+    c.drawImage(pil_to_imagereader(pil_img), dx, dy, width=tw, height=th, mask="auto")
+
+
+def build_pdf_combo_direct_from_pairs(original_bytes_list: list[bytes], coloring_bytes_list: list[bytes], paper: str) -> bytes:
+    """
+    Combo mode, optimized:
+    Draw original directly into left half and coloring directly into right half.
+    No intermediate combined PNG.
+    """
+    pagesize, _page_w, _page_h, (x0, y0, usable_w, usable_h) = _pdf_page_geometry(paper)
+
+    gutter = 6 * mm
+    half_w = (usable_w - gutter) / 2
+    left_x = x0
+    right_x = x0 + half_w + gutter
 
     out = io.BytesIO()
     c = pdfcanvas.Canvas(out, pagesize=pagesize)
@@ -459,12 +475,21 @@ def build_pdf_combo_from_pairs(original_bytes_list: list[bytes], coloring_bytes_
     c.setAuthor("Fargeleggingsgenerator")
 
     for idx, (original_bytes, coloring_bytes) in enumerate(zip(original_bytes_list, coloring_bytes_list), start=1):
-        combo_start = time.time()
-        combined_png = combine_side_by_side_bytes(original_bytes, coloring_bytes)
-        img = Image.open(io.BytesIO(combined_png)).convert("RGB")
-        _draw_fit(c, img, x0, y0, usable_w, usable_h)
+        page_start = time.time()
+
+        orig = Image.open(io.BytesIO(original_bytes))
+        orig = ImageOps.exif_transpose(orig)
+        if max(orig.size) > ALBUM_ORIG_MAX_DIM:
+            orig.thumbnail((ALBUM_ORIG_MAX_DIM, ALBUM_ORIG_MAX_DIM), Image.LANCZOS)
+
+        col = Image.open(io.BytesIO(coloring_bytes))
+        col = ImageOps.exif_transpose(col)
+
+        _draw_fit_in_box(c, orig, left_x, y0, half_w, usable_h)
+        _draw_fit_in_box(c, col, right_x, y0, half_w, usable_h)
         c.showPage()
-        print(f"Komboside {idx} bygget på {time.time() - combo_start:.1f} sek", flush=True)
+
+        print(f"Komboside {idx} direkte i PDF på {time.time() - page_start:.1f} sek", flush=True)
 
     c.save()
     out.seek(0)
@@ -472,12 +497,8 @@ def build_pdf_combo_from_pairs(original_bytes_list: list[bytes], coloring_bytes_
 
 
 def build_pdf_album_from_pairs(original_bytes_list: list[bytes], coloring_bytes_list: list[bytes], paper: str) -> bytes:
-    """
-    Album mode:
-      - page 1: original (downscaled to avoid OOM)
-      - page 2: coloring
-    """
-    pagesize, (x0, y0, usable_w, usable_h) = _pdf_page_geometry(paper)
+    """Album mode: page 1 original, page 2 coloring."""
+    pagesize, _page_w, _page_h, (x0, y0, usable_w, usable_h) = _pdf_page_geometry(paper)
 
     out = io.BytesIO()
     c = pdfcanvas.Canvas(out, pagesize=pagesize)
@@ -553,7 +574,7 @@ def process():
 
     if mode == "booklet":
         paper = request.form.get("paper", "A4")
-        layout = request.form.get("layout", "album")  # default album
+        layout = request.form.get("layout", "album")
 
         files = request.files.getlist("booklet_images")
         files = [f for f in files if f and f.filename]
@@ -563,7 +584,6 @@ def process():
 
         print("PDF request:", {"paper": paper, "layout": layout, "count": len(files)}, flush=True)
 
-        # Read all files once up front so we can parallelize safely
         originals_with_names: list[tuple[str, bytes]] = []
         for file in files:
             original_bytes = file.read()
@@ -583,7 +603,7 @@ def process():
             raise
 
         if layout == "combo":
-            pdf_bytes = build_pdf_combo_from_pairs(original_bytes_list, coloring_bytes_list, paper=paper)
+            pdf_bytes = build_pdf_combo_direct_from_pairs(original_bytes_list, coloring_bytes_list, paper=paper)
             title = "combo"
         else:
             pdf_bytes = build_pdf_album_from_pairs(original_bytes_list, coloring_bytes_list, paper=paper)
