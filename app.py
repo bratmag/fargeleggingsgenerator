@@ -1,12 +1,17 @@
 import base64
+import hashlib
 import io
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 from flask import Flask, request, send_file, render_template_string
 from openai import OpenAI, BadRequestError
 from PIL import Image, ImageOps
+from werkzeug.exceptions import RequestEntityTooLarge
 
 # PDF (ReportLab)
 from reportlab.pdfgen import canvas as pdfcanvas
@@ -16,22 +21,34 @@ from reportlab.lib.utils import ImageReader
 
 client = OpenAI()
 
-# --- Limits ---
+# -----------------------------
+# Limits / config
+# -----------------------------
 MAX_FILES_SINGLE = 1
 BOOKLET_MIN = 2
 BOOKLET_MAX = 4
-
-# Parallel OpenAI calls for booklet mode
 MAX_PARALLEL_WORKERS = 4  # keep <= BOOKLET_MAX
 
-# --- Image sizes ---
+# Total request size limit (Render safety)
+MAX_CONTENT_LENGTH_MB = 25
+
+# OpenAI output size
 SIDE_WIDTH = 1024
 SIDE_HEIGHT = 1536
 IMAGE_SIZE_STR = f"{SIDE_WIDTH}x{SIDE_HEIGHT}"
 
-# Downscale originals in album mode to avoid OOM on Render
-ALBUM_ORIG_MAX_DIM = 2200
+# Input preprocessing sizes
+OPENAI_INPUT_MAX_DIM = 1600
+PDF_IMAGE_MAX_DIM = 2200
+SINGLE_COMBO_MAX_DIM = 2200
 
+# Cache
+CACHE_DIR = Path("/tmp/coloring_cache")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# -----------------------------
+# Prompt
+# -----------------------------
 BASE_PROMPT = """
 Convert this photo into a clean, black-and-white line drawing coloring page
 for young children (around 4–7 years old).
@@ -310,6 +327,20 @@ HTML_PAGE = """
 """
 
 
+# -----------------------------
+# Data structures
+# -----------------------------
+@dataclass
+class PreparedImage:
+    original_filename: str
+    original_bytes: bytes
+    openai_input_bytes: bytes
+    pdf_bytes: bytes
+
+
+# -----------------------------
+# Helpers
+# -----------------------------
 def build_prompt(detail_level: str) -> str:
     extra = ""
     if detail_level == "simple":
@@ -319,21 +350,94 @@ def build_prompt(detail_level: str) -> str:
     return BASE_PROMPT + extra
 
 
-def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
-    """Calls OpenAI image API and returns PNG bytes for the coloring image."""
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    img = ImageOps.exif_transpose(img)
+def sanitize_stem(filename: str) -> str:
+    stem = (filename or "bilde").rsplit(".", 1)[0].strip()
+    stem = stem.replace(" ", "-")
+    stem = re.sub(r"[^A-Za-z0-9ÆØÅæøå.-]+", "-", stem)
+    stem = re.sub(r"-{2,}", "-", stem).strip("-")
+    return stem or "bilde"
 
-    max_dim = 1600
-    if max(img.size) > max_dim:
-        img.thumbnail((max_dim, max_dim), Image.LANCZOS)
 
+def pil_image_from_bytes(image_bytes: bytes) -> Image.Image:
+    with Image.open(io.BytesIO(image_bytes)) as raw:
+        img = ImageOps.exif_transpose(raw)
+        return img.convert("RGB")
+
+
+def image_to_jpeg_bytes(img: Image.Image, quality: int = 88) -> bytes:
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    buf.name = "upload.png"
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    return buf.getvalue()
+
+
+def prepare_image_variants(image_bytes: bytes, filename: str) -> PreparedImage:
+    """
+    Prepares two reusable variants:
+    - openai_input_bytes: JPEG, auto-rotated, RGB, max 1600 px
+    - pdf_bytes: JPEG, auto-rotated, RGB, max 2200 px
+    """
+    start = time.time()
+    base_img = pil_image_from_bytes(image_bytes)
+
+    openai_img = base_img.copy()
+    if max(openai_img.size) > OPENAI_INPUT_MAX_DIM:
+        openai_img.thumbnail((OPENAI_INPUT_MAX_DIM, OPENAI_INPUT_MAX_DIM), Image.LANCZOS)
+    openai_input_bytes = image_to_jpeg_bytes(openai_img, quality=88)
+
+    pdf_img = base_img.copy()
+    if max(pdf_img.size) > PDF_IMAGE_MAX_DIM:
+        pdf_img.thumbnail((PDF_IMAGE_MAX_DIM, PDF_IMAGE_MAX_DIM), Image.LANCZOS)
+    pdf_bytes = image_to_jpeg_bytes(pdf_img, quality=90)
+
+    print(
+        f"Preprocess '{filename}': orig={len(image_bytes)/1024:.0f}KB, "
+        f"openai={len(openai_input_bytes)/1024:.0f}KB, pdf={len(pdf_bytes)/1024:.0f}KB "
+        f"på {time.time() - start:.1f} sek",
+        flush=True,
+    )
+
+    return PreparedImage(
+        original_filename=filename,
+        original_bytes=image_bytes,
+        openai_input_bytes=openai_input_bytes,
+        pdf_bytes=pdf_bytes,
+    )
+
+
+def cache_key(image_bytes: bytes, detail_level: str) -> str:
+    h = hashlib.sha256()
+    h.update(image_bytes)
+    h.update(detail_level.encode("utf-8"))
+    h.update(IMAGE_SIZE_STR.encode("utf-8"))
+    h.update(b"prompt-v1")
+    return h.hexdigest()
+
+
+def get_cached_coloring(image_bytes: bytes, detail_level: str) -> bytes | None:
+    key = cache_key(image_bytes, detail_level)
+    path = CACHE_DIR / f"{key}.png"
+    if path.exists():
+        print(f"Cache hit: {path.name}", flush=True)
+        return path.read_bytes()
+    return None
+
+
+def set_cached_coloring(image_bytes: bytes, detail_level: str, coloring_bytes: bytes) -> None:
+    key = cache_key(image_bytes, detail_level)
+    path = CACHE_DIR / f"{key}.png"
+    path.write_bytes(coloring_bytes)
+
+
+def generate_coloring_bytes(prepared: PreparedImage, detail_level: str) -> bytes:
+    """Calls OpenAI image API and returns PNG bytes for the coloring image."""
+    cached = get_cached_coloring(prepared.openai_input_bytes, detail_level)
+    if cached is not None:
+        return cached
 
     prompt = build_prompt(detail_level)
+
+    buf = io.BytesIO(prepared.openai_input_bytes)
+    buf.name = "upload.jpg"
 
     start = time.time()
     try:
@@ -349,24 +453,35 @@ def generate_coloring_bytes(image_bytes: bytes, detail_level: str) -> bytes:
         if "moderation_blocked" in str(e):
             raise ValueError("moderation_blocked")
         raise
-    print(f"OpenAI image generation tok {time.time() - start:.1f} sek", flush=True)
+
+    elapsed = time.time() - start
+    print(
+        f"OpenAI image generation tok {elapsed:.1f} sek "
+        f"(input {len(prepared.openai_input_bytes)/1024:.0f}KB, fil '{prepared.original_filename}')",
+        flush=True,
+    )
 
     image_base64 = result.data[0].b64_json
-    return base64.b64decode(image_base64)
+    coloring_bytes = base64.b64decode(image_base64)
+    set_cached_coloring(prepared.openai_input_bytes, detail_level, coloring_bytes)
+    return coloring_bytes
 
 
-def generate_coloring_batch_parallel(original_bytes_list: list[bytes], detail: str) -> list[bytes]:
+def generate_coloring_batch_parallel(prepared_images: list[PreparedImage], detail: str) -> list[bytes]:
     """Generate coloring images in parallel and preserve original order."""
     batch_start = time.time()
-    results: list[bytes | None] = [None] * len(original_bytes_list)
+    results: list[bytes | None] = [None] * len(prepared_images)
 
-    max_workers = min(MAX_PARALLEL_WORKERS, len(original_bytes_list))
-    print(f"Starter parallell OpenAI-generering: {len(original_bytes_list)} bilder, workers={max_workers}", flush=True)
+    max_workers = min(MAX_PARALLEL_WORKERS, len(prepared_images))
+    print(
+        f"Starter parallell OpenAI-generering: {len(prepared_images)} bilder, workers={max_workers}",
+        flush=True,
+    )
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_idx = {
-            executor.submit(generate_coloring_bytes, image_bytes, detail): idx
-            for idx, image_bytes in enumerate(original_bytes_list)
+            executor.submit(generate_coloring_bytes, prepared, detail): idx
+            for idx, prepared in enumerate(prepared_images)
         }
 
         for future in as_completed(future_to_idx):
@@ -383,17 +498,21 @@ def generate_coloring_batch_parallel(original_bytes_list: list[bytes], detail: s
     return [r for r in results if r is not None]
 
 
-def combine_side_by_side_bytes(original_bytes: bytes, coloring_bytes: bytes) -> bytes:
-    """Used only for single-image PNG mode."""
-    orig = Image.open(io.BytesIO(original_bytes)).convert("RGB")
-    orig = ImageOps.exif_transpose(orig)
-
-    col = Image.open(io.BytesIO(coloring_bytes)).convert("RGB")
+def combine_side_by_side_bytes(original_pdf_bytes: bytes, coloring_bytes: bytes) -> bytes:
+    """
+    Single mode PNG output:
+    builds a combined PNG with original left + coloring right.
+    Uses preprocessed original bytes for lower memory usage.
+    """
+    orig = pil_image_from_bytes(original_pdf_bytes)
+    col = pil_image_from_bytes(coloring_bytes)
 
     canvas_img = Image.new("RGB", (SIDE_WIDTH * 2, SIDE_HEIGHT), color=(255, 255, 255))
 
     def place_in_box(img: Image.Image, box_left: int):
         img_copy = img.copy()
+        if max(img_copy.size) > SINGLE_COMBO_MAX_DIM:
+            img_copy.thumbnail((SINGLE_COMBO_MAX_DIM, SINGLE_COMBO_MAX_DIM), Image.LANCZOS)
         img_copy.thumbnail((SIDE_WIDTH, SIDE_HEIGHT), Image.LANCZOS)
         x_offset = box_left + (SIDE_WIDTH - img_copy.width) // 2
         y_offset = (SIDE_HEIGHT - img_copy.height) // 2
@@ -409,10 +528,17 @@ def combine_side_by_side_bytes(original_bytes: bytes, coloring_bytes: bytes) -> 
 
 
 def pil_to_imagereader(img: Image.Image) -> ImageReader:
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    buf.seek(0)
-    return ImageReader(buf)
+    """
+    Fast path: use ImageReader directly on PIL image.
+    Fallback: convert to JPEG bytes if environment is picky.
+    """
+    try:
+        return ImageReader(img)
+    except Exception:
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=90, optimize=True)
+        buf.seek(0)
+        return ImageReader(buf)
 
 
 def _pdf_page_geometry(paper: str):
@@ -435,7 +561,6 @@ def _pdf_page_geometry(paper: str):
 
 
 def _draw_fit(c, pil_img: Image.Image, x0: float, y0: float, usable_w: float, usable_h: float):
-    pil_img = pil_img.convert("RGB")
     iw, ih = pil_img.size
     scale = min(usable_w / iw, usable_h / ih)
     tw = iw * scale
@@ -446,7 +571,6 @@ def _draw_fit(c, pil_img: Image.Image, x0: float, y0: float, usable_w: float, us
 
 
 def _draw_fit_in_box(c, pil_img: Image.Image, box_x: float, box_y: float, box_w: float, box_h: float):
-    pil_img = pil_img.convert("RGB")
     iw, ih = pil_img.size
     scale = min(box_w / iw, box_h / ih)
     tw = iw * scale
@@ -456,7 +580,11 @@ def _draw_fit_in_box(c, pil_img: Image.Image, box_x: float, box_y: float, box_w:
     c.drawImage(pil_to_imagereader(pil_img), dx, dy, width=tw, height=th, mask="auto")
 
 
-def build_pdf_combo_direct_from_pairs(original_bytes_list: list[bytes], coloring_bytes_list: list[bytes], paper: str) -> bytes:
+def build_pdf_combo_direct_from_pairs(
+    original_pdf_bytes_list: list[bytes],
+    coloring_bytes_list: list[bytes],
+    paper: str,
+) -> bytes:
     """
     Combo mode, optimized:
     Draw original directly into left half and coloring directly into right half.
@@ -474,16 +602,11 @@ def build_pdf_combo_direct_from_pairs(original_bytes_list: list[bytes], coloring
     c.setTitle("Fargeleggingshefte (Kombosider)")
     c.setAuthor("Fargeleggingsgenerator")
 
-    for idx, (original_bytes, coloring_bytes) in enumerate(zip(original_bytes_list, coloring_bytes_list), start=1):
+    for idx, (original_pdf_bytes, coloring_bytes) in enumerate(zip(original_pdf_bytes_list, coloring_bytes_list), start=1):
         page_start = time.time()
 
-        orig = Image.open(io.BytesIO(original_bytes))
-        orig = ImageOps.exif_transpose(orig)
-        if max(orig.size) > ALBUM_ORIG_MAX_DIM:
-            orig.thumbnail((ALBUM_ORIG_MAX_DIM, ALBUM_ORIG_MAX_DIM), Image.LANCZOS)
-
-        col = Image.open(io.BytesIO(coloring_bytes))
-        col = ImageOps.exif_transpose(col)
+        orig = pil_image_from_bytes(original_pdf_bytes)
+        col = pil_image_from_bytes(coloring_bytes)
 
         _draw_fit_in_box(c, orig, left_x, y0, half_w, usable_h)
         _draw_fit_in_box(c, col, right_x, y0, half_w, usable_h)
@@ -496,7 +619,11 @@ def build_pdf_combo_direct_from_pairs(original_bytes_list: list[bytes], coloring
     return out.getvalue()
 
 
-def build_pdf_album_from_pairs(original_bytes_list: list[bytes], coloring_bytes_list: list[bytes], paper: str) -> bytes:
+def build_pdf_album_from_pairs(
+    original_pdf_bytes_list: list[bytes],
+    coloring_bytes_list: list[bytes],
+    paper: str,
+) -> bytes:
     """Album mode: page 1 original, page 2 coloring."""
     pagesize, _page_w, _page_h, (x0, y0, usable_w, usable_h) = _pdf_page_geometry(paper)
 
@@ -505,18 +632,14 @@ def build_pdf_album_from_pairs(original_bytes_list: list[bytes], coloring_bytes_
     c.setTitle("Fargeleggingshefte (Album)")
     c.setAuthor("Fargeleggingsgenerator")
 
-    for idx, (original_bytes, coloring_bytes) in enumerate(zip(original_bytes_list, coloring_bytes_list), start=1):
+    for idx, (original_pdf_bytes, coloring_bytes) in enumerate(zip(original_pdf_bytes_list, coloring_bytes_list), start=1):
         pair_start = time.time()
 
-        orig = Image.open(io.BytesIO(original_bytes))
-        orig = ImageOps.exif_transpose(orig)
-        if max(orig.size) > ALBUM_ORIG_MAX_DIM:
-            orig.thumbnail((ALBUM_ORIG_MAX_DIM, ALBUM_ORIG_MAX_DIM), Image.LANCZOS)
+        orig = pil_image_from_bytes(original_pdf_bytes)
         _draw_fit(c, orig, x0, y0, usable_w, usable_h)
         c.showPage()
 
-        col = Image.open(io.BytesIO(coloring_bytes))
-        col = ImageOps.exif_transpose(col)
+        col = pil_image_from_bytes(coloring_bytes)
         _draw_fit(c, col, x0, y0, usable_w, usable_h)
         c.showPage()
 
@@ -527,7 +650,123 @@ def build_pdf_album_from_pairs(original_bytes_list: list[bytes], coloring_bytes_
     return out.getvalue()
 
 
+def read_single_upload() -> tuple[str, bytes]:
+    files = request.files.getlist("images")
+    if not files or files[0].filename == "":
+        raise ValueError("Ingen filer lastet opp.")
+
+    if len(files) > MAX_FILES_SINGLE:
+        raise ValueError(
+            f"På grunn av begrensninger i serveren kan du foreløpig bare laste opp {MAX_FILES_SINGLE} bilde om gangen."
+        )
+
+    file = files[0]
+    original_bytes = file.read()
+    if not original_bytes:
+        raise ValueError("Ingen gyldige bilder.")
+
+    return file.filename or "bilde", original_bytes
+
+
+def read_booklet_uploads() -> list[tuple[str, bytes]]:
+    files = request.files.getlist("booklet_images")
+    files = [f for f in files if f and f.filename]
+
+    if len(files) < BOOKLET_MIN or len(files) > BOOKLET_MAX:
+        raise ValueError(f"Last opp {BOOKLET_MIN}–{BOOKLET_MAX} bilder (du lastet opp {len(files)}).")
+
+    originals_with_names: list[tuple[str, bytes]] = []
+    for file in files:
+        original_bytes = file.read()
+        if original_bytes:
+            originals_with_names.append((file.filename or "bilde", original_bytes))
+
+    if len(originals_with_names) < BOOKLET_MIN:
+        raise ValueError("Ingen gyldige bilder.")
+
+    return originals_with_names
+
+
+def handle_single_mode(detail: str):
+    filename, original_bytes = read_single_upload()
+    prepared = prepare_image_variants(original_bytes, filename)
+
+    try:
+        coloring_bytes = generate_coloring_bytes(prepared, detail)
+    except ValueError as e:
+        if "moderation_blocked" in str(e):
+            return (
+                "Bildet ditt ble stoppet av sikkerhetssystemet til OpenAI. "
+                "Prøv et annet bilde (mer klær, nøytral setting, ingen sensitive situasjoner).",
+                400,
+            )
+        raise
+
+    combined_png = combine_side_by_side_bytes(prepared.pdf_bytes, coloring_bytes)
+    stem = sanitize_stem(filename)
+    name = f"{stem}-combo.png"
+
+    return send_file(
+        io.BytesIO(combined_png),
+        mimetype="image/png",
+        as_attachment=True,
+        download_name=name,
+    )
+
+
+def handle_booklet_mode(detail: str):
+    paper = request.form.get("paper", "A4")
+    layout = request.form.get("layout", "album")
+
+    originals_with_names = read_booklet_uploads()
+
+    print("PDF request:", {"paper": paper, "layout": layout, "count": len(originals_with_names)}, flush=True)
+
+    prepared_images = [prepare_image_variants(image_bytes, filename) for filename, image_bytes in originals_with_names]
+
+    try:
+        coloring_bytes_list = generate_coloring_batch_parallel(prepared_images, detail)
+    except ValueError as e:
+        if "moderation_blocked_" in str(e):
+            return "Et av bildene ble stoppet av sikkerhetssystemet til OpenAI. Fjern det bildet og prøv igjen.", 400
+        raise
+
+    original_pdf_bytes_list = [prepared.pdf_bytes for prepared in prepared_images]
+
+    pdf_start = time.time()
+    if layout == "combo":
+        pdf_bytes = build_pdf_combo_direct_from_pairs(original_pdf_bytes_list, coloring_bytes_list, paper=paper)
+        title = "combo"
+    else:
+        pdf_bytes = build_pdf_album_from_pairs(original_pdf_bytes_list, coloring_bytes_list, paper=paper)
+        title = "album"
+
+    print(f"PDF generert på {time.time() - pdf_start:.1f} sek", flush=True)
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    filename = f"fargeleggingshefte-{title}-{paper}-{stamp}.pdf"
+
+    return send_file(
+        io.BytesIO(pdf_bytes),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=filename,
+    )
+
+
+# -----------------------------
+# Flask app
+# -----------------------------
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH_MB * 1024 * 1024
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_file_too_large(_e):
+    return (
+        f"Opplastingen er for stor. Prøv færre eller mindre bilder. Maks total størrelse er {MAX_CONTENT_LENGTH_MB} MB.",
+        413,
+    )
 
 
 @app.route("/", methods=["GET"])
@@ -541,81 +780,19 @@ def process():
     mode = request.form.get("mode", "single")
     detail = request.form.get("detail", "normal")
 
-    if mode == "single":
-        files = request.files.getlist("images")
-        if not files or files[0].filename == "":
-            return "Ingen filer lastet opp.", 400
-
-        if len(files) > MAX_FILES_SINGLE:
-            return f"På grunn av begrensninger i serveren kan du foreløpig bare laste opp {MAX_FILES_SINGLE} bilde om gangen.", 400
-
-        file = files[0]
-        original_bytes = file.read()
-        if not original_bytes:
-            return "Ingen gyldige bilder.", 400
-
-        try:
-            coloring_bytes = generate_coloring_bytes(original_bytes, detail)
-        except ValueError as e:
-            if "moderation_blocked" in str(e):
-                return (
-                    "Bildet ditt ble stoppet av sikkerhetssystemet til OpenAI. "
-                    "Prøv et annet bilde (mer klær, nøytral setting, ingen sensitive situasjoner).",
-                    400,
-                )
-            raise
-
-        combined_png = combine_side_by_side_bytes(original_bytes, coloring_bytes)
-        stem = (file.filename or "bilde").rsplit(".", 1)[0].replace(" ", "_")
-        name = f"{stem}_combo.png"
-
-        print(f"Hele request tok {time.time() - request_start:.1f} sek", flush=True)
-        return send_file(io.BytesIO(combined_png), mimetype="image/png", as_attachment=True, download_name=name)
-
-    if mode == "booklet":
-        paper = request.form.get("paper", "A4")
-        layout = request.form.get("layout", "album")
-
-        files = request.files.getlist("booklet_images")
-        files = [f for f in files if f and f.filename]
-
-        if len(files) < BOOKLET_MIN or len(files) > BOOKLET_MAX:
-            return f"Last opp {BOOKLET_MIN}–{BOOKLET_MAX} bilder (du lastet opp {len(files)}).", 400
-
-        print("PDF request:", {"paper": paper, "layout": layout, "count": len(files)}, flush=True)
-
-        originals_with_names: list[tuple[str, bytes]] = []
-        for file in files:
-            original_bytes = file.read()
-            if original_bytes:
-                originals_with_names.append((file.filename or "bilde", original_bytes))
-
-        if len(originals_with_names) < BOOKLET_MIN:
-            return "Ingen gyldige bilder.", 400
-
-        original_bytes_list = [b for _, b in originals_with_names]
-
-        try:
-            coloring_bytes_list = generate_coloring_batch_parallel(original_bytes_list, detail)
-        except ValueError as e:
-            if "moderation_blocked_" in str(e):
-                return "Et av bildene ble stoppet av sikkerhetssystemet til OpenAI. Fjern det bildet og prøv igjen.", 400
-            raise
-
-        if layout == "combo":
-            pdf_bytes = build_pdf_combo_direct_from_pairs(original_bytes_list, coloring_bytes_list, paper=paper)
-            title = "combo"
+    try:
+        if mode == "single":
+            response = handle_single_mode(detail)
+        elif mode == "booklet":
+            response = handle_booklet_mode(detail)
         else:
-            pdf_bytes = build_pdf_album_from_pairs(original_bytes_list, coloring_bytes_list, paper=paper)
-            title = "album"
-
-        stamp = datetime.now().strftime("%Y%m%d_%H%M")
-        filename = f"fargeleggingshefte_{title}_{paper}_{stamp}.pdf"
+            return "Ugyldig valg.", 400
 
         print(f"Hele request tok {time.time() - request_start:.1f} sek", flush=True)
-        return send_file(io.BytesIO(pdf_bytes), mimetype="application/pdf", as_attachment=True, download_name=filename)
+        return response
 
-    return "Ugyldig valg.", 400
+    except ValueError as e:
+        return str(e), 400
 
 
 if __name__ == "__main__":
