@@ -1,0 +1,265 @@
+Fargeleggingsgenerator – teknisk oversikt
+Prosjekt
+
+Web-app som gjør fotografier om til fargeleggingsark for barn.
+
+Nettside:
+https://fargeleggingsgenerator.onrender.com
+
+Funksjon:
+
+Bruker laster opp ett eller flere bilder
+
+OpenAI genererer en line-art coloring page
+
+Systemet lager enten
+
+kombobilde (original + fargelegging)
+
+PDF-hefte
+
+Teknologistack
+
+Backend
+
+Python
+
+Flask
+
+Pillow (bildebehandling)
+
+ReportLab (PDF-generering)
+
+AI
+
+OpenAI Images API
+
+modell: gpt-image-1
+
+brukes via images.edit
+
+Hosting
+
+Render.com (free tier)
+
+Gunicorn WSGI server
+
+Repo
+
+GitHub
+
+Arkitektur
+1. Web UI
+
+HTML side med:
+
+drag-and-drop opplasting
+
+modusvalg
+
+Moduser
+
+single
+booklet
+
+Booklet layout
+
+combo
+album
+AI-pipeline
+
+Når et bilde lastes opp:
+
+Pillow åpner og normaliserer bildet
+
+EXIF-rotasjon korrigeres
+
+Bildet nedskaleres (maks 1600 px)
+
+Deretter sendes bildet til OpenAI:
+
+client.images.edit(
+    model="gpt-image-1",
+    image=buf,
+    prompt=BASE_PROMPT,
+    size="1024x1536"
+)
+
+Prompt instruerer modellen til å lage:
+
+rene svarte streker
+
+ingen shading
+
+enkel stil for barn
+
+Parallell generering
+
+PDF-modus bruker ThreadPoolExecutor.
+
+Dette gjør at flere OpenAI-kall kjøres samtidig.
+
+ThreadPoolExecutor(max_workers=4)
+
+Typisk logg:
+
+Starter parallell OpenAI-generering: 4 bilder
+Parallelt bilde 3 ferdig
+Parallelt bilde 1 ferdig
+Parallelt bilde 4 ferdig
+Parallelt bilde 2 ferdig
+
+Dette reduserer genereringstiden betydelig.
+
+PDF-generering
+
+Bibliotek
+
+ReportLab
+
+Støttede formater
+
+A4
+A5
+Layout: album
+
+To sider per bilde:
+
+Side 1: original
+Side 2: fargelegging
+
+Brukes ofte til:
+
+fotoalbum
+
+barn kan se originalen først
+
+Layout: combo
+
+En side per bilde:
+
+[ original ] [ fargelegging ]
+
+Optimalisert versjon:
+
+bildene tegnes direkte i PDF
+
+ingen mellomliggende PNG
+
+Dette sparer CPU og RAM på Render.
+
+Performance (observasjoner)
+
+Typiske tider (4 bilder):
+
+steg	tid
+OpenAI generering	~60–80 sek
+PDF generering	~10–30 sek
+total	~90–120 sek
+
+Tidligere versjon brukte >4 min fordi:
+
+kombobilder ble generert som PNG først
+
+Begrensninger (Render free tier)
+
+Minne
+
+~512 MB
+
+Timeout
+
+Gunicorn timeout: 600 sek
+
+Maks bilder per PDF
+
+4
+
+Dette er valgt for stabilitet.
+
+Viktige funksjoner
+
+parallell OpenAI generering
+
+moderasjonshåndtering
+
+automatisk EXIF-rotasjon
+
+nedskalering av bilder
+
+direkte PDF-rendering
+
+Mulige fremtidige forbedringer
+1. Caching av AI-resultater
+
+unngå regenerering av samme bilde
+
+2. Job queue
+
+Celery / Redis for lengre jobber
+
+3. Progress bar
+
+Websocket / polling
+
+4. Batch-generering
+
+10–20 sider
+
+5. Print-optimalisering
+
+bleed / margins
+
+6. Betalingsmodell
+
+Vipps / Stripe
+
+Prosjektstruktur
+
+Typisk repo:
+
+fargelegging-web
+│
+├─ app.py
+├─ requirements.txt
+├─ static/
+│   └─ background-kids.png
+└─ README.md
+Lokal utvikling
+
+Start lokalt:
+
+python app.py
+
+Server:
+
+http://127.0.0.1:5000
+
+Deploy skjer automatisk via GitHub → Render.
+
+AI-prompt
+
+Grunnprompt:
+
+Convert this photo into a clean black-and-white
+line drawing coloring page for young children.
+Formål
+
+Målet er å lage en enkel tjeneste hvor foreldre kan:
+
+laste opp familiebilder
+
+få personlige fargeleggingsark
+
+lage små hefter til barn
+
+Hvis du starter en ny ChatGPT-tråd
+
+Lim inn:
+
+Dette prosjektet bruker Flask + OpenAI images.edit til å generere
+fargeleggingsark fra bilder og lage PDF-hefter.
+Her er teknisk oversikt:
+[paste dokumentet]
+
+Hvis du vil, kan jeg også lage en mye kortere “AI-resume” (5 linjer) som er enda bedre å lime inn i nye ChatGPT-tråder. Den gjør at jeg forstår hele prosjektet på 3 sekunder.
