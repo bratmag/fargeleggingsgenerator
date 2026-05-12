@@ -7,6 +7,7 @@ Produksjon: https://fargeleggingsgenerator.onrender.com
 ## Funksjoner
 
 - Last opp ett bilde og få et kombobilde med original og fargeleggingsark.
+- Enkeltbilder vises som forhåndsvisning før brukeren velger å laste ned.
 - Last opp 2-4 bilder og få et PDF-hefte.
 - Velg A4/A5, albumlayout eller kombosider.
 - Bildene normaliseres med Pillow før de sendes til OpenAI.
@@ -69,4 +70,5 @@ Sett `OPENAI_API_KEY` som environment variable i Render. For små instanser bør
 - Det finnes en enkel in-memory rate limit per serverprosess.
 - For offentlig trafikk bør dette byttes til en delt limiter, for eksempel Redis eller en betalings-/kvoteløsning.
 - Cache ligger i `/tmp/coloring_cache` og er derfor midlertidig på Render.
+- Forhåndsvisninger ligger midlertidig i `/tmp/coloring_previews` og ryddes etter omtrent en time.
 - Maks opplastingsstørrelse, pikselgrense og bildefiltyper valideres før OpenAI-kall.

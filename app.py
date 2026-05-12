@@ -4,12 +4,13 @@ import io
 import os
 import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, request, send_file, render_template_string
+from flask import Flask, jsonify, request, send_file, render_template_string
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -83,6 +84,8 @@ Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 # Cache
 CACHE_DIR = Path("/tmp/coloring_cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+PREVIEW_DIR = Path("/tmp/coloring_previews")
+PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
 
 # -----------------------------
 # Prompt
@@ -152,6 +155,8 @@ HTML_PAGE = """
         padding: 0.65rem 1.5rem; font-size: 0.95rem; cursor: pointer; white-space: nowrap;
       }
       button:hover { background: #4338ca; }
+      button.secondary { background: #ffffff; color: #374151; border: 1px solid #d1d5db; }
+      button.secondary:hover { background: #f9fafb; }
       .hint { margin-top: 0.9rem; font-size: 0.8rem; color: #6b7280; }
       .footer { margin-top: 1.2rem; font-size: 0.75rem; color: #9ca3af; }
 
@@ -166,6 +171,21 @@ HTML_PAGE = """
         width: 36px; height: 36px; border-radius: 999px; border: 3px solid #e5e7eb; border-top-color: #4f46e5;
         animation: spin 0.9s linear infinite; margin: 0 auto 0.9rem auto;
       }
+      .preview-box {
+        background: #ffffff; padding: 1rem; border-radius: 0.9rem;
+        box-shadow: 0 18px 40px rgba(15,23,42,0.3);
+        width: min(960px, calc(100vw - 2rem)); max-height: calc(100vh - 2rem);
+        display: flex; flex-direction: column; gap: 0.8rem;
+      }
+      .preview-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+      .preview-title { margin: 0; font-size: 1.05rem; }
+      .preview-image-wrap {
+        background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 0.6rem;
+        overflow: auto; display: flex; align-items: center; justify-content: center;
+      }
+      .preview-image { max-width: 100%; max-height: 68vh; display: block; background: #ffffff; }
+      .preview-actions { display: flex; justify-content: flex-end; gap: 0.6rem; flex-wrap: wrap; }
+      .error-text { color: #b91c1c; font-size: 0.85rem; margin-top: 0.6rem; min-height: 1.1rem; }
       @keyframes spin { to { transform: rotate(360deg); } }
 
       @media (max-width: 600px) {
@@ -173,6 +193,7 @@ HTML_PAGE = """
         .controls-row { flex-direction: column; align-items: stretch; }
         button { width: 100%; text-align: center; justify-content: center; }
         .file-list { text-align: center; }
+        .preview-actions { flex-direction: column-reverse; }
       }
     </style>
   </head>
@@ -252,6 +273,7 @@ HTML_PAGE = """
         <p class="hint" id="hintText">
           Last opp ett bilde for kombobilde.
         </p>
+        <div id="errorText" class="error-text"></div>
       </form>
 
       <div class="footer">
@@ -267,10 +289,32 @@ HTML_PAGE = """
       </div>
     </div>
 
+    <div id="previewModal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="previewTitle">
+      <div class="preview-box">
+        <div class="preview-header">
+          <h2 id="previewTitle" class="preview-title">Forhåndsvisning</h2>
+          <button type="button" class="secondary" id="closePreviewBtn">Lukk</button>
+        </div>
+        <div class="preview-image-wrap">
+          <img id="previewImage" class="preview-image" alt="Forhåndsvisning av generert fargeleggingsark">
+        </div>
+        <div class="preview-actions">
+          <button type="button" class="secondary" id="retryPreviewBtn">Juster og generer på nytt</button>
+          <button type="button" id="acceptPreviewBtn">Godkjenn og last ned</button>
+        </div>
+      </div>
+    </div>
+
     <script>
       const form = document.getElementById('form');
       const overlay = document.getElementById('overlay');
       const overlayText = document.getElementById('overlayText');
+      const errorText = document.getElementById('errorText');
+      const previewModal = document.getElementById('previewModal');
+      const previewImage = document.getElementById('previewImage');
+      const closePreviewBtn = document.getElementById('closePreviewBtn');
+      const retryPreviewBtn = document.getElementById('retryPreviewBtn');
+      const acceptPreviewBtn = document.getElementById('acceptPreviewBtn');
 
       const singleBox = document.getElementById('singleBox');
       const bookletBox = document.getElementById('bookletBox');
@@ -371,13 +415,67 @@ HTML_PAGE = """
       attachDnD(document.getElementById('dropzoneBooklet'), bookletInput, updateBookletList, false);
 
       let overlayTimeout = null;
-      form.addEventListener('submit', () => {
+      let currentDownloadUrl = null;
+
+      function hideOverlay() {
+        overlay.classList.add('hidden');
+        if (overlayTimeout) clearTimeout(overlayTimeout);
+      }
+
+      function closePreview() {
+        previewModal.classList.add('hidden');
+        previewImage.removeAttribute('src');
+        currentDownloadUrl = null;
+      }
+
+      closePreviewBtn.addEventListener('click', closePreview);
+      retryPreviewBtn.addEventListener('click', closePreview);
+      previewModal.addEventListener('click', (event) => {
+        if (event.target === previewModal) closePreview();
+      });
+      acceptPreviewBtn.addEventListener('click', () => {
+        if (currentDownloadUrl) window.location.href = currentDownloadUrl;
+      });
+
+      form.addEventListener('submit', async (event) => {
         const mode = document.querySelector('input[name="mode"]:checked').value;
         console.log('Submitting mode:', mode);
+        errorText.textContent = '';
 
         overlay.classList.remove('hidden');
         if (overlayTimeout) clearTimeout(overlayTimeout);
         overlayTimeout = setTimeout(() => overlay.classList.add('hidden'), 10 * 60 * 1000);
+
+        if (mode !== 'single') return;
+
+        event.preventDefault();
+        submitBtn.disabled = true;
+
+        try {
+          const formData = new FormData(form);
+          formData.set('preview', '1');
+
+          const response = await fetch('/process', {
+            method: 'POST',
+            body: formData,
+            headers: { 'Accept': 'application/json' }
+          });
+
+          if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || 'Genereringen feilet.');
+          }
+
+          const data = await response.json();
+          currentDownloadUrl = data.download_url;
+          previewImage.src = data.preview_url;
+          previewModal.classList.remove('hidden');
+        } catch (error) {
+          errorText.textContent = error.message || 'Noe gikk galt. Prøv igjen.';
+        } finally {
+          submitBtn.disabled = false;
+          hideOverlay();
+        }
       });
 
       window.addEventListener('focus', () => {
@@ -523,6 +621,40 @@ def set_cached_coloring(image_bytes: bytes, detail_level: str, coloring_bytes: b
     key = cache_key(image_bytes, detail_level)
     path = CACHE_DIR / f"{key}.png"
     path.write_bytes(coloring_bytes)
+
+
+def cleanup_old_previews(max_age_seconds: int = 60 * 60) -> None:
+    cutoff = time.time() - max_age_seconds
+    for path in PREVIEW_DIR.glob("*"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
+
+
+def save_preview_png(image_bytes: bytes, filename: str) -> str:
+    cleanup_old_previews()
+    preview_id = uuid.uuid4().hex
+    (PREVIEW_DIR / f"{preview_id}.png").write_bytes(image_bytes)
+    (PREVIEW_DIR / f"{preview_id}.txt").write_text(filename, encoding="utf-8")
+    return preview_id
+
+
+def preview_path(preview_id: str) -> Path:
+    if not re.fullmatch(r"[a-f0-9]{32}", preview_id or ""):
+        raise ValueError("Ugyldig forhåndsvisning.")
+    path = PREVIEW_DIR / f"{preview_id}.png"
+    if not path.exists():
+        raise ValueError("Forhåndsvisningen er utløpt. Generer bildet på nytt.")
+    return path
+
+
+def preview_filename(preview_id: str) -> str:
+    path = PREVIEW_DIR / f"{preview_id}.txt"
+    if not path.exists():
+        return "fargeleggingsark-combo.png"
+    return path.read_text(encoding="utf-8").strip() or "fargeleggingsark-combo.png"
 
 
 def log_openai_usage(result) -> None:
@@ -817,6 +949,17 @@ def handle_single_mode(detail: str, single_files):
     stem = sanitize_stem(filename)
     name = f"{stem}-combo.png"
 
+    wants_preview = request.form.get("preview") == "1" or "application/json" in request.headers.get("Accept", "")
+    if wants_preview:
+        preview_id = save_preview_png(combined_png, name)
+        return jsonify(
+            {
+                "preview_url": f"/preview/{preview_id}",
+                "download_url": f"/download/{preview_id}",
+                "filename": name,
+            }
+        )
+
     return send_file(
         io.BytesIO(combined_png),
         mimetype="image/png",
@@ -893,6 +1036,29 @@ def handle_file_too_large(_e):
 @app.route("/", methods=["GET"])
 def index():
     return render_template_string(HTML_PAGE)
+
+
+@app.route("/preview/<preview_id>", methods=["GET"])
+def preview_image(preview_id: str):
+    try:
+        path = preview_path(preview_id)
+    except ValueError as e:
+        return str(e), 404
+    return send_file(path, mimetype="image/png", as_attachment=False)
+
+
+@app.route("/download/<preview_id>", methods=["GET"])
+def download_preview(preview_id: str):
+    try:
+        path = preview_path(preview_id)
+    except ValueError as e:
+        return str(e), 404
+    return send_file(
+        path,
+        mimetype="image/png",
+        as_attachment=True,
+        download_name=preview_filename(preview_id),
+    )
 
 
 @app.route("/process", methods=["POST"])
