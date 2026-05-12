@@ -7,7 +7,7 @@ Produksjon: https://fargeleggingsgenerator.onrender.com
 ## Funksjoner
 
 - Last opp ett bilde og få et kombobilde med original og fargeleggingsark.
-- Enkeltbilder vises som forhåndsvisning før brukeren velger å laste ned.
+- Enkeltbilder og PDF-hefter vises som forhåndsvisning før brukeren velger å laste ned.
 - Last opp 2-4 bilder og få et PDF-hefte.
 - Velg A4/A5, albumlayout eller kombosider.
 - Bildene normaliseres med Pillow før de sendes til OpenAI.

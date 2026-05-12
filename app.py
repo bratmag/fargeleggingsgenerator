@@ -179,11 +179,14 @@ HTML_PAGE = """
       }
       .preview-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
       .preview-title { margin: 0; font-size: 1.05rem; }
-      .preview-image-wrap {
+      .preview-content-wrap {
         background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 0.6rem;
         overflow: auto; display: flex; align-items: center; justify-content: center;
+        min-height: 360px;
       }
       .preview-image { max-width: 100%; max-height: 68vh; display: block; background: #ffffff; }
+      .preview-frame { width: 100%; height: 68vh; border: 0; background: #ffffff; display: block; }
+      .preview-hidden { display: none; }
       .preview-actions { display: flex; justify-content: flex-end; gap: 0.6rem; flex-wrap: wrap; }
       .error-text { color: #b91c1c; font-size: 0.85rem; margin-top: 0.6rem; min-height: 1.1rem; }
       @keyframes spin { to { transform: rotate(360deg); } }
@@ -295,8 +298,9 @@ HTML_PAGE = """
           <h2 id="previewTitle" class="preview-title">Forhåndsvisning</h2>
           <button type="button" class="secondary" id="closePreviewBtn">Lukk</button>
         </div>
-        <div class="preview-image-wrap">
+        <div class="preview-content-wrap">
           <img id="previewImage" class="preview-image" alt="Forhåndsvisning av generert fargeleggingsark">
+          <iframe id="previewFrame" class="preview-frame preview-hidden" title="Forhåndsvisning av PDF"></iframe>
         </div>
         <div class="preview-actions">
           <button type="button" class="secondary" id="retryPreviewBtn">Juster og generer på nytt</button>
@@ -312,6 +316,7 @@ HTML_PAGE = """
       const errorText = document.getElementById('errorText');
       const previewModal = document.getElementById('previewModal');
       const previewImage = document.getElementById('previewImage');
+      const previewFrame = document.getElementById('previewFrame');
       const closePreviewBtn = document.getElementById('closePreviewBtn');
       const retryPreviewBtn = document.getElementById('retryPreviewBtn');
       const acceptPreviewBtn = document.getElementById('acceptPreviewBtn');
@@ -425,6 +430,9 @@ HTML_PAGE = """
       function closePreview() {
         previewModal.classList.add('hidden');
         previewImage.removeAttribute('src');
+        previewFrame.removeAttribute('src');
+        previewImage.classList.remove('preview-hidden');
+        previewFrame.classList.add('preview-hidden');
         currentDownloadUrl = null;
       }
 
@@ -446,8 +454,6 @@ HTML_PAGE = """
         if (overlayTimeout) clearTimeout(overlayTimeout);
         overlayTimeout = setTimeout(() => overlay.classList.add('hidden'), 10 * 60 * 1000);
 
-        if (mode !== 'single') return;
-
         event.preventDefault();
         submitBtn.disabled = true;
 
@@ -468,7 +474,15 @@ HTML_PAGE = """
 
           const data = await response.json();
           currentDownloadUrl = data.download_url;
-          previewImage.src = data.preview_url;
+          if (data.kind === 'pdf') {
+            previewImage.classList.add('preview-hidden');
+            previewFrame.classList.remove('preview-hidden');
+            previewFrame.src = data.preview_url;
+          } else {
+            previewFrame.classList.add('preview-hidden');
+            previewImage.classList.remove('preview-hidden');
+            previewImage.src = data.preview_url;
+          }
           previewModal.classList.remove('hidden');
         } catch (error) {
           errorText.textContent = error.message || 'Noe gikk galt. Prøv igjen.';
@@ -633,10 +647,12 @@ def cleanup_old_previews(max_age_seconds: int = 60 * 60) -> None:
             pass
 
 
-def save_preview_png(image_bytes: bytes, filename: str) -> str:
+def save_preview_file(content: bytes, filename: str, suffix: str) -> str:
+    if suffix not in {"png", "pdf"}:
+        raise ValueError("Ugyldig forhåndsvisningstype.")
     cleanup_old_previews()
     preview_id = uuid.uuid4().hex
-    (PREVIEW_DIR / f"{preview_id}.png").write_bytes(image_bytes)
+    (PREVIEW_DIR / f"{preview_id}.{suffix}").write_bytes(content)
     (PREVIEW_DIR / f"{preview_id}.txt").write_text(filename, encoding="utf-8")
     return preview_id
 
@@ -655,6 +671,15 @@ def preview_filename(preview_id: str) -> str:
     if not path.exists():
         return "fargeleggingsark-combo.png"
     return path.read_text(encoding="utf-8").strip() or "fargeleggingsark-combo.png"
+
+
+def pdf_preview_path(preview_id: str) -> Path:
+    if not re.fullmatch(r"[a-f0-9]{32}", preview_id or ""):
+        raise ValueError("Ugyldig forhåndsvisning.")
+    path = PREVIEW_DIR / f"{preview_id}.pdf"
+    if not path.exists():
+        raise ValueError("Forhåndsvisningen er utløpt. Generer heftet på nytt.")
+    return path
 
 
 def log_openai_usage(result) -> None:
@@ -951,12 +976,13 @@ def handle_single_mode(detail: str, single_files):
 
     wants_preview = request.form.get("preview") == "1" or "application/json" in request.headers.get("Accept", "")
     if wants_preview:
-        preview_id = save_preview_png(combined_png, name)
+        preview_id = save_preview_file(combined_png, name, "png")
         return jsonify(
             {
                 "preview_url": f"/preview/{preview_id}",
                 "download_url": f"/download/{preview_id}",
                 "filename": name,
+                "kind": "image",
             }
         )
 
@@ -1010,6 +1036,18 @@ def handle_booklet_mode(detail: str, booklet_files):
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     filename = f"fargeleggingshefte-{title}-{paper}-{stamp}.pdf"
 
+    wants_preview = request.form.get("preview") == "1" or "application/json" in request.headers.get("Accept", "")
+    if wants_preview:
+        preview_id = save_preview_file(pdf_bytes, filename, "pdf")
+        return jsonify(
+            {
+                "preview_url": f"/preview-pdf/{preview_id}",
+                "download_url": f"/download-pdf/{preview_id}",
+                "filename": filename,
+                "kind": "pdf",
+            }
+        )
+
     return send_file(
         io.BytesIO(pdf_bytes),
         mimetype="application/pdf",
@@ -1056,6 +1094,29 @@ def download_preview(preview_id: str):
     return send_file(
         path,
         mimetype="image/png",
+        as_attachment=True,
+        download_name=preview_filename(preview_id),
+    )
+
+
+@app.route("/preview-pdf/<preview_id>", methods=["GET"])
+def preview_pdf(preview_id: str):
+    try:
+        path = pdf_preview_path(preview_id)
+    except ValueError as e:
+        return str(e), 404
+    return send_file(path, mimetype="application/pdf", as_attachment=False)
+
+
+@app.route("/download-pdf/<preview_id>", methods=["GET"])
+def download_pdf(preview_id: str):
+    try:
+        path = pdf_preview_path(preview_id)
+    except ValueError as e:
+        return str(e), 404
+    return send_file(
+        path,
+        mimetype="application/pdf",
         as_attachment=True,
         download_name=preview_filename(preview_id),
     )
