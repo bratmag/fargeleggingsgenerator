@@ -72,6 +72,12 @@ SIDE_HEIGHT = 1536
 IMAGE_SIZE_STR = f"{SIDE_WIDTH}x{SIDE_HEIGHT}"
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1-mini").strip() or "gpt-image-1-mini"
 OPENAI_IMAGE_QUALITY = env_choice("OPENAI_IMAGE_QUALITY", "medium", {"low", "medium", "high", "auto"})
+ENGINE_PRESETS = {
+    "mini_medium": ("gpt-image-1-mini", "medium", "Mini / medium"),
+    "mini_high": ("gpt-image-1-mini", "high", "Mini / høy"),
+    "standard_medium": ("gpt-image-1", "medium", "Standard / medium"),
+    "standard_high": ("gpt-image-1", "high", "Standard / høy"),
+}
 
 # Input preprocessing sizes
 OPENAI_INPUT_MAX_DIM = env_int("OPENAI_INPUT_MAX_DIM", 1280, min_value=512, max_value=2048)
@@ -268,6 +274,15 @@ HTML_PAGE = """
               <option value="simple">Ren og enkel (minst detaljer)</option>
               <option value="normal" selected>Normal</option>
               <option value="detailed">Mer detaljer</option>
+            </select>
+          </div>
+          <div class="control-group">
+            <label for="engine">Motor:</label>
+            <select name="engine" id="engine">
+              <option value="mini_medium" selected>Mini / medium</option>
+              <option value="mini_high">Mini / høy</option>
+              <option value="standard_medium">Standard / medium</option>
+              <option value="standard_high">Standard / høy</option>
             </select>
           </div>
           <button type="submit" id="submitBtn">Generer fargeleggingsark</button>
@@ -516,9 +531,27 @@ class PreparedImage:
     pdf_bytes: bytes
 
 
+@dataclass(frozen=True)
+class GenerationSettings:
+    model: str
+    quality: str
+    label: str
+
+
 # -----------------------------
 # Helpers
 # -----------------------------
+def generation_settings_from_preset(preset: str | None) -> GenerationSettings:
+    if preset in ENGINE_PRESETS:
+        model, quality, label = ENGINE_PRESETS[preset]
+        return GenerationSettings(model=model, quality=quality, label=label)
+    return GenerationSettings(
+        model=OPENAI_IMAGE_MODEL,
+        quality=OPENAI_IMAGE_QUALITY,
+        label=f"{OPENAI_IMAGE_MODEL} / {OPENAI_IMAGE_QUALITY}",
+    )
+
+
 def build_prompt(detail_level: str) -> str:
     extra = ""
     if detail_level == "simple":
@@ -611,19 +644,19 @@ def prepare_image_variants(image_bytes: bytes, filename: str) -> PreparedImage:
     )
 
 
-def cache_key(image_bytes: bytes, detail_level: str) -> str:
+def cache_key(image_bytes: bytes, detail_level: str, settings: GenerationSettings) -> str:
     h = hashlib.sha256()
     h.update(image_bytes)
     h.update(detail_level.encode("utf-8"))
     h.update(IMAGE_SIZE_STR.encode("utf-8"))
-    h.update(OPENAI_IMAGE_MODEL.encode("utf-8"))
-    h.update(OPENAI_IMAGE_QUALITY.encode("utf-8"))
+    h.update(settings.model.encode("utf-8"))
+    h.update(settings.quality.encode("utf-8"))
     h.update(b"prompt-v2")
     return h.hexdigest()
 
 
-def get_cached_coloring(image_bytes: bytes, detail_level: str) -> bytes | None:
-    key = cache_key(image_bytes, detail_level)
+def get_cached_coloring(image_bytes: bytes, detail_level: str, settings: GenerationSettings) -> bytes | None:
+    key = cache_key(image_bytes, detail_level, settings)
     path = CACHE_DIR / f"{key}.png"
     if path.exists():
         print(f"Cache hit: {path.name}", flush=True)
@@ -631,8 +664,13 @@ def get_cached_coloring(image_bytes: bytes, detail_level: str) -> bytes | None:
     return None
 
 
-def set_cached_coloring(image_bytes: bytes, detail_level: str, coloring_bytes: bytes) -> None:
-    key = cache_key(image_bytes, detail_level)
+def set_cached_coloring(
+    image_bytes: bytes,
+    detail_level: str,
+    settings: GenerationSettings,
+    coloring_bytes: bytes,
+) -> None:
+    key = cache_key(image_bytes, detail_level, settings)
     path = CACHE_DIR / f"{key}.png"
     path.write_bytes(coloring_bytes)
 
@@ -702,9 +740,9 @@ def log_openai_usage(result) -> None:
     )
 
 
-def generate_coloring_bytes(prepared: PreparedImage, detail_level: str) -> bytes:
+def generate_coloring_bytes(prepared: PreparedImage, detail_level: str, settings: GenerationSettings) -> bytes:
     """Calls OpenAI image API and returns PNG bytes for the coloring image."""
-    cached = get_cached_coloring(prepared.openai_input_bytes, detail_level)
+    cached = get_cached_coloring(prepared.openai_input_bytes, detail_level, settings)
     if cached is not None:
         return cached
 
@@ -716,12 +754,12 @@ def generate_coloring_bytes(prepared: PreparedImage, detail_level: str) -> bytes
     start = time.time()
     try:
         result = client.images.edit(
-            model=OPENAI_IMAGE_MODEL,
+            model=settings.model,
             image=buf,
             prompt=prompt,
             size=IMAGE_SIZE_STR,
             output_format="png",
-            quality=OPENAI_IMAGE_QUALITY,
+            quality=settings.quality,
         )
     except BadRequestError as e:
         if "moderation_blocked" in str(e):
@@ -736,7 +774,7 @@ def generate_coloring_bytes(prepared: PreparedImage, detail_level: str) -> bytes
 
     elapsed = time.time() - start
     print(
-        f"OpenAI image generation tok {elapsed:.1f} sek med {OPENAI_IMAGE_MODEL}/{OPENAI_IMAGE_QUALITY} "
+        f"OpenAI image generation tok {elapsed:.1f} sek med {settings.model}/{settings.quality} "
         f"(input {len(prepared.openai_input_bytes)/1024:.0f}KB, fil '{prepared.original_filename}')",
         flush=True,
     )
@@ -744,11 +782,15 @@ def generate_coloring_bytes(prepared: PreparedImage, detail_level: str) -> bytes
 
     image_base64 = result.data[0].b64_json
     coloring_bytes = base64.b64decode(image_base64)
-    set_cached_coloring(prepared.openai_input_bytes, detail_level, coloring_bytes)
+    set_cached_coloring(prepared.openai_input_bytes, detail_level, settings, coloring_bytes)
     return coloring_bytes
 
 
-def generate_coloring_batch_parallel(prepared_images: list[PreparedImage], detail: str) -> list[bytes]:
+def generate_coloring_batch_parallel(
+    prepared_images: list[PreparedImage],
+    detail: str,
+    settings: GenerationSettings,
+) -> list[bytes]:
     """Generate coloring images in parallel and preserve original order."""
     batch_start = time.time()
     results: list[bytes | None] = [None] * len(prepared_images)
@@ -761,7 +803,7 @@ def generate_coloring_batch_parallel(prepared_images: list[PreparedImage], detai
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_idx = {
-            executor.submit(generate_coloring_bytes, prepared, detail): idx
+            executor.submit(generate_coloring_bytes, prepared, detail, settings): idx
             for idx, prepared in enumerate(prepared_images)
         }
 
@@ -942,7 +984,7 @@ def build_pdf_album_from_pairs(
     return out.getvalue()
 
 
-def handle_single_mode(detail: str, single_files):
+def handle_single_mode(detail: str, settings: GenerationSettings, single_files):
     if not single_files or single_files[0].filename == "":
         raise ValueError("Ingen filer lastet opp.")
 
@@ -960,7 +1002,7 @@ def handle_single_mode(detail: str, single_files):
     prepared = prepare_image_variants(original_bytes, filename)
 
     try:
-        coloring_bytes = generate_coloring_bytes(prepared, detail)
+        coloring_bytes = generate_coloring_bytes(prepared, detail, settings)
     except ValueError as e:
         if "moderation_blocked" in str(e):
             return (
@@ -994,7 +1036,7 @@ def handle_single_mode(detail: str, single_files):
     )
 
 
-def handle_booklet_mode(detail: str, booklet_files):
+def handle_booklet_mode(detail: str, settings: GenerationSettings, booklet_files):
     paper = request.form.get("paper", "A4")
     layout = request.form.get("layout", "album")
 
@@ -1015,7 +1057,7 @@ def handle_booklet_mode(detail: str, booklet_files):
     prepared_images = [prepare_image_variants(image_bytes, filename) for filename, image_bytes in originals_with_names]
 
     try:
-        coloring_bytes_list = generate_coloring_batch_parallel(prepared_images, detail)
+        coloring_bytes_list = generate_coloring_batch_parallel(prepared_images, detail, settings)
     except ValueError as e:
         if "moderation_blocked_" in str(e):
             return "Et av bildene ble stoppet av sikkerhetssystemet til OpenAI. Fjern det bildet og prøv igjen.", 400
@@ -1128,6 +1170,8 @@ def process():
 
     form_mode = request.form.get("mode", "single")
     detail = request.form.get("detail", "normal")
+    engine = request.form.get("engine")
+    settings = generation_settings_from_preset(engine)
 
     single_files = [f for f in request.files.getlist("images") if f and f.filename]
     booklet_files = [f for f in request.files.getlist("booklet_images") if f and f.filename]
@@ -1142,7 +1186,8 @@ def process():
 
     print(
         f"Mode fra skjema: {form_mode} | tolket mode: {mode} | "
-        f"single_files={len(single_files)} | booklet_files={len(booklet_files)}",
+        f"single_files={len(single_files)} | booklet_files={len(booklet_files)} | "
+        f"motor={settings.label}",
         flush=True,
     )
 
@@ -1150,9 +1195,9 @@ def process():
         validate_rate_limit()
 
         if mode == "single":
-            response = handle_single_mode(detail, single_files)
+            response = handle_single_mode(detail, settings, single_files)
         elif mode == "booklet":
-            response = handle_booklet_mode(detail, booklet_files)
+            response = handle_booklet_mode(detail, settings, booklet_files)
         else:
             return "Ugyldig valg.", 400
 

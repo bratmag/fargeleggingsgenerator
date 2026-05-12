@@ -10,6 +10,7 @@ Produksjon: https://fargeleggingsgenerator.onrender.com
 - Enkeltbilder og PDF-hefter vises som forhåndsvisning før brukeren velger å laste ned.
 - Last opp 2-4 bilder og få et PDF-hefte.
 - Velg A4/A5, albumlayout eller kombosider.
+- Velg testmotor i UI-et: Mini/medium, Mini/høy, Standard/medium eller Standard/høy.
 - Bildene normaliseres med Pillow før de sendes til OpenAI.
 - PDF-er bygges direkte med ReportLab for lavere minnebruk.
 
@@ -42,7 +43,7 @@ MAX_REQUESTS_PER_WINDOW=8
 RATE_LIMIT_WINDOW_SECONDS=3600
 ```
 
-Bruk `OPENAI_IMAGE_QUALITY=low` hvis hastighet og pris er viktigere enn kvalitet. Bruk `OPENAI_IMAGE_MODEL=gpt-image-1` eller en nyere GPT Image-modell hvis du vil prioritere kvalitet over kostnad.
+Miljøvariablene er fallback-defaults. I test-UI-et kan motor velges per generering, slik at samme bilde kan sammenlignes på tvers av modell og kvalitet.
 
 ## Lokal utvikling
 
