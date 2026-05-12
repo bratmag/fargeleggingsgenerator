@@ -1,7 +1,6 @@
-flask
-openai
-pillow
-gunicorn
-stripe
-reportlab==4.4.9
+flask>=3.0,<4
+openai>=1.0,<2
+pillow>=10,<12
+gunicorn>=22,<24
+reportlab>=4.4,<5
 

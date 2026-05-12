@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import io
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -9,8 +10,15 @@ from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, request, send_file, render_template_string
-from openai import OpenAI, BadRequestError
-from PIL import Image, ImageOps
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    BadRequestError,
+    OpenAI,
+    RateLimitError,
+)
+from PIL import Image, ImageOps, UnidentifiedImageError
 from werkzeug.exceptions import RequestEntityTooLarge
 
 # PDF (ReportLab)
@@ -24,23 +32,53 @@ client = OpenAI()
 # -----------------------------
 # Limits / config
 # -----------------------------
+def env_int(name: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
+
+def env_choice(name: str, default: str, allowed: set[str]) -> str:
+    value = os.getenv(name, default).strip()
+    return value if value in allowed else default
+
+
 MAX_FILES_SINGLE = 1
-BOOKLET_MIN = 2
-BOOKLET_MAX = 4
-MAX_PARALLEL_WORKERS = 4  # keep <= BOOKLET_MAX
+BOOKLET_MIN = env_int("BOOKLET_MIN", 2, min_value=1)
+BOOKLET_MAX = env_int("BOOKLET_MAX", 4, min_value=BOOKLET_MIN, max_value=8)
+MAX_PARALLEL_WORKERS = env_int("MAX_PARALLEL_WORKERS", 2, min_value=1, max_value=BOOKLET_MAX)
 
 # Total request size limit (Render safety)
-MAX_CONTENT_LENGTH_MB = 25
+MAX_CONTENT_LENGTH_MB = env_int("MAX_CONTENT_LENGTH_MB", 18, min_value=1, max_value=50)
+
+# Basic abuse/cost guard. This is per Render process, so use a real shared limiter before heavy traffic.
+RATE_LIMIT_WINDOW_SECONDS = env_int("RATE_LIMIT_WINDOW_SECONDS", 3600, min_value=60)
+MAX_REQUESTS_PER_WINDOW = env_int("MAX_REQUESTS_PER_WINDOW", 8, min_value=1)
+REQUEST_LOG: dict[str, list[float]] = {}
 
 # OpenAI output size
 SIDE_WIDTH = 1024
 SIDE_HEIGHT = 1536
 IMAGE_SIZE_STR = f"{SIDE_WIDTH}x{SIDE_HEIGHT}"
+OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1-mini").strip() or "gpt-image-1-mini"
+OPENAI_IMAGE_QUALITY = env_choice("OPENAI_IMAGE_QUALITY", "low", {"low", "medium", "high", "auto"})
 
 # Input preprocessing sizes
-OPENAI_INPUT_MAX_DIM = 1600
-PDF_IMAGE_MAX_DIM = 2200
-SINGLE_COMBO_MAX_DIM = 2200
+OPENAI_INPUT_MAX_DIM = env_int("OPENAI_INPUT_MAX_DIM", 1280, min_value=512, max_value=2048)
+PDF_IMAGE_MAX_DIM = env_int("PDF_IMAGE_MAX_DIM", 1800, min_value=512, max_value=2400)
+SINGLE_COMBO_MAX_DIM = env_int("SINGLE_COMBO_MAX_DIM", 1800, min_value=512, max_value=2400)
+MAX_IMAGE_PIXELS = env_int("MAX_IMAGE_PIXELS", 12_000_000, min_value=1_000_000, max_value=40_000_000)
+ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 # Cache
 CACHE_DIR = Path("/tmp/coloring_cache")
@@ -386,10 +424,36 @@ def sanitize_stem(filename: str) -> str:
     return stem or "bilde"
 
 
+def validate_rate_limit() -> None:
+    now = time.time()
+    remote_addr = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    window_start = now - RATE_LIMIT_WINDOW_SECONDS
+    recent = [ts for ts in REQUEST_LOG.get(remote_addr, []) if ts > window_start]
+    if len(recent) >= MAX_REQUESTS_PER_WINDOW:
+        raise ValueError("For mange genereringer på kort tid. Vent litt før du prøver igjen.")
+    recent.append(now)
+    REQUEST_LOG[remote_addr] = recent
+
+
 def pil_image_from_bytes(image_bytes: bytes) -> Image.Image:
-    with Image.open(io.BytesIO(image_bytes)) as raw:
-        img = ImageOps.exif_transpose(raw)
-        return img.convert("RGB")
+    try:
+        raw = Image.open(io.BytesIO(image_bytes))
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError("Ugyldig bildefil. Last opp JPG, PNG eller WebP.") from exc
+
+    try:
+        with raw:
+            if raw.format not in ALLOWED_IMAGE_FORMATS:
+                raise ValueError("Ugyldig bildeformat. Last opp JPG, PNG eller WebP.")
+            width, height = raw.size
+            if width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
+                raise ValueError("Bildet er for stort. Prøv et mindre bilde.")
+            img = ImageOps.exif_transpose(raw)
+            return img.convert("RGB")
+    except Image.DecompressionBombError as exc:
+        raise ValueError("Bildet er for stort. Prøv et mindre bilde.") from exc
+    except OSError as exc:
+        raise ValueError("Ugyldig bildefil. Last opp JPG, PNG eller WebP.") from exc
 
 
 def image_to_jpeg_bytes(img: Image.Image, quality: int = 88) -> bytes:
@@ -440,7 +504,9 @@ def cache_key(image_bytes: bytes, detail_level: str) -> str:
     h.update(image_bytes)
     h.update(detail_level.encode("utf-8"))
     h.update(IMAGE_SIZE_STR.encode("utf-8"))
-    h.update(b"prompt-v1")
+    h.update(OPENAI_IMAGE_MODEL.encode("utf-8"))
+    h.update(OPENAI_IMAGE_QUALITY.encode("utf-8"))
+    h.update(b"prompt-v2")
     return h.hexdigest()
 
 
@@ -473,21 +539,27 @@ def generate_coloring_bytes(prepared: PreparedImage, detail_level: str) -> bytes
     start = time.time()
     try:
         result = client.images.edit(
-            model="gpt-image-1",
+            model=OPENAI_IMAGE_MODEL,
             image=buf,
             prompt=prompt,
             size=IMAGE_SIZE_STR,
             output_format="png",
-            quality="high",
+            quality=OPENAI_IMAGE_QUALITY,
         )
     except BadRequestError as e:
         if "moderation_blocked" in str(e):
             raise ValueError("moderation_blocked")
         raise
+    except RateLimitError as exc:
+        raise ValueError("OpenAI har midlertidig rate limit. Prøv igjen om litt.") from exc
+    except (APITimeoutError, APIConnectionError) as exc:
+        raise ValueError("Kunne ikke nå OpenAI akkurat nå. Prøv igjen om litt.") from exc
+    except APIStatusError as exc:
+        raise ValueError("OpenAI svarte med en midlertidig feil. Prøv igjen om litt.") from exc
 
     elapsed = time.time() - start
     print(
-        f"OpenAI image generation tok {elapsed:.1f} sek "
+        f"OpenAI image generation tok {elapsed:.1f} sek med {OPENAI_IMAGE_MODEL}/{OPENAI_IMAGE_QUALITY} "
         f"(input {len(prepared.openai_input_bytes)/1024:.0f}KB, fil '{prepared.original_filename}')",
         flush=True,
     )
@@ -827,6 +899,8 @@ def process():
     )
 
     try:
+        validate_rate_limit()
+
         if mode == "single":
             response = handle_single_mode(detail, single_files)
         elif mode == "booklet":
