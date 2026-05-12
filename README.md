@@ -10,7 +10,7 @@ Produksjon: https://fargeleggingsgenerator.onrender.com
 - Enkeltbilder og PDF-hefter vises som forhåndsvisning før brukeren velger å laste ned.
 - Last opp 2-10 bilder og få et PDF-hefte.
 - Velg A4/A5, albumlayout eller kombosider.
-- Lag CEWE A4 stående test-PDF for innholdssider med 26 sider, 3 mm bleed og 5 mm sikkerhetsmarg.
+- Lag CEWE A4 stående test-PDF for innholdssider med original + fargelegging, 26 sider, 3 mm bleed og 5 mm sikkerhetsmarg.
 - Velg testmotor i UI-et: Mini/medium, Mini/høy, Standard/medium eller Standard/høy.
 - Bildene normaliseres med Pillow før de sendes til OpenAI.
 - PDF-er bygges direkte med ReportLab for lavere minnebruk.

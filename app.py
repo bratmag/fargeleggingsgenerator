@@ -1017,10 +1017,14 @@ def build_pdf_album_from_pairs(
     return out.getvalue()
 
 
-def build_pdf_cewe_a4_content(coloring_bytes_list: list[bytes]) -> bytes:
+def build_pdf_cewe_a4_content(
+    original_pdf_bytes_list: list[bytes],
+    coloring_bytes_list: list[bytes],
+) -> bytes:
     """
     CEWE FOTOBOK A4 portrait content test export.
     Uses CEWE template values: 205 x 270 mm trim, 3 mm bleed, 5 mm safe area.
+    Uses the same story rhythm as album mode: original page, then coloring page.
     Pads to 26 pages because CEWE's PDF photobook content templates start there.
     """
     page_w = CEWE_A4_CONTENT_TRIM_W + 2 * CEWE_CONTENT_BLEED
@@ -1031,7 +1035,15 @@ def build_pdf_cewe_a4_content(coloring_bytes_list: list[bytes]) -> bytes:
     safe_y = CEWE_CONTENT_BLEED + CEWE_CONTENT_SAFE
     safe_w = CEWE_A4_CONTENT_TRIM_W - 2 * CEWE_CONTENT_SAFE
     safe_h = CEWE_A4_CONTENT_TRIM_H - 2 * CEWE_CONTENT_SAFE
-    page_count = max(CEWE_CONTENT_MIN_PAGES, len(coloring_bytes_list))
+    page_images: list[tuple[str, bytes]] = []
+    for idx, (original_pdf_bytes, coloring_bytes) in enumerate(
+        zip(original_pdf_bytes_list, coloring_bytes_list),
+        start=1,
+    ):
+        page_images.append((f"original {idx}", original_pdf_bytes))
+        page_images.append((f"fargelegging {idx}", coloring_bytes))
+
+    page_count = max(CEWE_CONTENT_MIN_PAGES, len(page_images))
 
     out = io.BytesIO()
     c = pdfcanvas.Canvas(out, pagesize=pagesize)
@@ -1040,12 +1052,13 @@ def build_pdf_cewe_a4_content(coloring_bytes_list: list[bytes]) -> bytes:
 
     for idx in range(page_count):
         _set_cewe_pdf_boxes(c)
-        if idx < len(coloring_bytes_list):
+        if idx < len(page_images):
             page_start = time.time()
-            col = pil_image_from_bytes(coloring_bytes_list[idx])
-            _draw_fit_in_box(c, col, safe_x, safe_y, safe_w, safe_h)
-            col.close()
-            print(f"CEWE-side {idx + 1} ferdig på {time.time() - page_start:.1f} sek", flush=True)
+            label, image_bytes = page_images[idx]
+            img = pil_image_from_bytes(image_bytes)
+            _draw_fit_in_box(c, img, safe_x, safe_y, safe_w, safe_h)
+            img.close()
+            print(f"CEWE-side {idx + 1} ({label}) ferdig på {time.time() - page_start:.1f} sek", flush=True)
         c.showPage()
 
     c.save()
@@ -1136,7 +1149,7 @@ def handle_booklet_mode(detail: str, settings: GenerationSettings, booklet_files
 
     pdf_start = time.time()
     if layout == "cewe":
-        pdf_bytes = build_pdf_cewe_a4_content(coloring_bytes_list)
+        pdf_bytes = build_pdf_cewe_a4_content(original_pdf_bytes_list, coloring_bytes_list)
         title = "cewe-a4-innhold"
         paper = "CEWE"
     elif layout == "combo":
