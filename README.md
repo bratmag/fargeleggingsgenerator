@@ -8,7 +8,7 @@ Produksjon: https://fargeleggingsgenerator.onrender.com
 
 - Last opp ett bilde og få et kombobilde med original og fargeleggingsark.
 - Enkeltbilder og PDF-hefter vises som forhåndsvisning før brukeren velger å laste ned.
-- Last opp 2-4 bilder og få et PDF-hefte.
+- Last opp 2-10 bilder og få et PDF-hefte.
 - Velg A4/A5, albumlayout eller kombosider.
 - Velg testmotor i UI-et: Mini/medium, Mini/høy, Standard/medium eller Standard/høy.
 - Bildene normaliseres med Pillow før de sendes til OpenAI.
@@ -37,8 +37,8 @@ OPENAI_IMAGE_QUALITY=medium
 OPENAI_INPUT_MAX_DIM=1280
 PDF_IMAGE_MAX_DIM=1800
 MAX_PARALLEL_WORKERS=2
-BOOKLET_MAX=4
-MAX_CONTENT_LENGTH_MB=18
+BOOKLET_MAX=10
+MAX_CONTENT_LENGTH_MB=50
 MAX_REQUESTS_PER_WINDOW=8
 RATE_LIMIT_WINDOW_SECONDS=3600
 ```

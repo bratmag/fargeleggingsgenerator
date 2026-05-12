@@ -55,11 +55,11 @@ def env_choice(name: str, default: str, allowed: set[str]) -> str:
 
 MAX_FILES_SINGLE = 1
 BOOKLET_MIN = env_int("BOOKLET_MIN", 2, min_value=1)
-BOOKLET_MAX = env_int("BOOKLET_MAX", 4, min_value=BOOKLET_MIN, max_value=8)
+BOOKLET_MAX = env_int("BOOKLET_MAX", 10, min_value=BOOKLET_MIN, max_value=20)
 MAX_PARALLEL_WORKERS = env_int("MAX_PARALLEL_WORKERS", 2, min_value=1, max_value=BOOKLET_MAX)
 
 # Total request size limit (Render safety)
-MAX_CONTENT_LENGTH_MB = env_int("MAX_CONTENT_LENGTH_MB", 18, min_value=1, max_value=50)
+MAX_CONTENT_LENGTH_MB = env_int("MAX_CONTENT_LENGTH_MB", 50, min_value=1, max_value=100)
 
 # Basic abuse/cost guard. This is per Render process, so use a real shared limiter before heavy traffic.
 RATE_LIMIT_WINDOW_SECONDS = env_int("RATE_LIMIT_WINDOW_SECONDS", 3600, min_value=60)
@@ -210,7 +210,7 @@ HTML_PAGE = """
     <div class="card">
       <h1>Fargeleggingsgenerator</h1>
       <p class="sub">
-        Last opp bilder og få et kombobilde (original + fargeleggingsark). Du kan også lage en PDF (2–4 bilder) for utskrift.
+        Last opp bilder og få et kombobilde (original + fargeleggingsark). Du kan også lage en PDF (2–10 bilder) for utskrift.
       </p>
 
       <form id="form" action="/process" method="post" enctype="multipart/form-data">
@@ -239,7 +239,7 @@ HTML_PAGE = """
         <div id="bookletBox" style="display:none;">
           <label class="dropzone" id="dropzoneBooklet">
             <input id="file-input-booklet" type="file" name="booklet_images" accept="image/*" multiple>
-            <div class="dropzone-title">Slipp 2–4 bilder her</div>
+            <div class="dropzone-title">Slipp 2–10 bilder her</div>
             <div class="dropzone-sub">eller klikk for å velge flere bilder</div>
           </label>
           <div id="file-list-booklet" class="file-list file-list-empty">Ingen filer valgt ennå.</div>
@@ -368,7 +368,7 @@ HTML_PAGE = """
 
         hintText.textContent = isSingle
           ? 'Last opp ett bilde for kombobilde.'
-          : 'PDF: last opp 2–4 bilder. Album gir 1 bilde per side.';
+          : 'PDF: last opp 2–10 bilder. Album gir 1 bilde per side.';
       }
 
       document.querySelectorAll('input[name="mode"]').forEach(r => {
