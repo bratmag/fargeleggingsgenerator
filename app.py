@@ -762,8 +762,13 @@ def generate_coloring_bytes(prepared: PreparedImage, detail_level: str, settings
             quality=settings.quality,
         )
     except BadRequestError as e:
-        if "moderation_blocked" in str(e):
+        error_text = str(e)
+        if "moderation_blocked" in error_text:
             raise ValueError("moderation_blocked")
+        if "billing_hard_limit_reached" in error_text or "Billing hard limit" in error_text:
+            raise ValueError(
+                "OpenAI-kontoen har nådd billing-grensen. Øk grensen i OpenAI eller bruk Mini / medium og prøv igjen."
+            ) from e
         raise
     except RateLimitError as exc:
         raise ValueError("OpenAI har midlertidig rate limit. Prøv igjen om litt.") from exc
