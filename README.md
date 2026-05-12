@@ -31,7 +31,7 @@ Viktige miljøvariabler:
 ```bash
 OPENAI_API_KEY=...
 OPENAI_IMAGE_MODEL=gpt-image-1-mini
-OPENAI_IMAGE_QUALITY=low
+OPENAI_IMAGE_QUALITY=medium
 OPENAI_INPUT_MAX_DIM=1280
 PDF_IMAGE_MAX_DIM=1800
 MAX_PARALLEL_WORKERS=2
@@ -41,7 +41,7 @@ MAX_REQUESTS_PER_WINDOW=8
 RATE_LIMIT_WINDOW_SECONDS=3600
 ```
 
-Bruk `OPENAI_IMAGE_QUALITY=medium` hvis kvaliteten blir for enkel. Bruk `OPENAI_IMAGE_MODEL=gpt-image-1` eller en nyere GPT Image-modell hvis du vil prioritere kvalitet over kostnad.
+Bruk `OPENAI_IMAGE_QUALITY=low` hvis hastighet og pris er viktigere enn kvalitet. Bruk `OPENAI_IMAGE_MODEL=gpt-image-1` eller en nyere GPT Image-modell hvis du vil prioritere kvalitet over kostnad.
 
 ## Lokal utvikling
 

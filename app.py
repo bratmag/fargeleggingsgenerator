@@ -70,7 +70,7 @@ SIDE_WIDTH = 1024
 SIDE_HEIGHT = 1536
 IMAGE_SIZE_STR = f"{SIDE_WIDTH}x{SIDE_HEIGHT}"
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1-mini").strip() or "gpt-image-1-mini"
-OPENAI_IMAGE_QUALITY = env_choice("OPENAI_IMAGE_QUALITY", "low", {"low", "medium", "high", "auto"})
+OPENAI_IMAGE_QUALITY = env_choice("OPENAI_IMAGE_QUALITY", "medium", {"low", "medium", "high", "auto"})
 
 # Input preprocessing sizes
 OPENAI_INPUT_MAX_DIM = env_int("OPENAI_INPUT_MAX_DIM", 1280, min_value=512, max_value=2048)
@@ -525,6 +525,26 @@ def set_cached_coloring(image_bytes: bytes, detail_level: str, coloring_bytes: b
     path.write_bytes(coloring_bytes)
 
 
+def log_openai_usage(result) -> None:
+    usage = getattr(result, "usage", None)
+    if usage is None:
+        print("OpenAI usage: ikke returnert av API-et", flush=True)
+        return
+
+    details = getattr(usage, "input_tokens_details", None)
+    output_details = getattr(usage, "output_tokens_details", None)
+    print(
+        "OpenAI usage: "
+        f"total={getattr(usage, 'total_tokens', 'ukjent')}, "
+        f"input={getattr(usage, 'input_tokens', 'ukjent')}, "
+        f"output={getattr(usage, 'output_tokens', 'ukjent')}, "
+        f"text_in={getattr(details, 'text_tokens', 'ukjent') if details else 'ukjent'}, "
+        f"image_in={getattr(details, 'image_tokens', 'ukjent') if details else 'ukjent'}, "
+        f"image_out={getattr(output_details, 'image_tokens', 'ukjent') if output_details else 'ukjent'}",
+        flush=True,
+    )
+
+
 def generate_coloring_bytes(prepared: PreparedImage, detail_level: str) -> bytes:
     """Calls OpenAI image API and returns PNG bytes for the coloring image."""
     cached = get_cached_coloring(prepared.openai_input_bytes, detail_level)
@@ -563,6 +583,7 @@ def generate_coloring_bytes(prepared: PreparedImage, detail_level: str) -> bytes
         f"(input {len(prepared.openai_input_bytes)/1024:.0f}KB, fil '{prepared.original_filename}')",
         flush=True,
     )
+    log_openai_usage(result)
 
     image_base64 = result.data[0].b64_json
     coloring_bytes = base64.b64decode(image_base64)
