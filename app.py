@@ -434,12 +434,10 @@ HTML_PAGE = """
       attachDnD(document.getElementById('dropzoneSingle'), singleInput, updateSingleList, true);
       attachDnD(document.getElementById('dropzoneBooklet'), bookletInput, updateBookletList, false);
 
-      let overlayTimeout = null;
       let currentDownloadUrl = null;
 
       function hideOverlay() {
         overlay.classList.add('hidden');
-        if (overlayTimeout) clearTimeout(overlayTimeout);
       }
 
       function closePreview() {
@@ -466,8 +464,6 @@ HTML_PAGE = """
         errorText.textContent = '';
 
         overlay.classList.remove('hidden');
-        if (overlayTimeout) clearTimeout(overlayTimeout);
-        overlayTimeout = setTimeout(() => overlay.classList.add('hidden'), 10 * 60 * 1000);
 
         event.preventDefault();
         submitBtn.disabled = true;
@@ -504,12 +500,6 @@ HTML_PAGE = """
         } finally {
           submitBtn.disabled = false;
           hideOverlay();
-        }
-      });
-
-      window.addEventListener('focus', () => {
-        if (!overlay.classList.contains('hidden')) {
-          setTimeout(() => overlay.classList.add('hidden'), 300);
         }
       });
 
