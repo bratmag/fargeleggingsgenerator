@@ -79,6 +79,13 @@ ENGINE_PRESETS = {
     "standard_high": ("gpt-image-1", "high", "Standard / høy"),
 }
 
+# CEWE A4 portrait content template values from CEWE FOTOBOK Maloppretter.
+CEWE_A4_CONTENT_TRIM_W = 205 * mm
+CEWE_A4_CONTENT_TRIM_H = 270 * mm
+CEWE_CONTENT_BLEED = 3 * mm
+CEWE_CONTENT_SAFE = 5 * mm
+CEWE_CONTENT_MIN_PAGES = 26
+
 # Input preprocessing sizes
 OPENAI_INPUT_MAX_DIM = env_int("OPENAI_INPUT_MAX_DIM", 1280, min_value=512, max_value=2048)
 PDF_IMAGE_MAX_DIM = env_int("PDF_IMAGE_MAX_DIM", 1800, min_value=512, max_value=2400)
@@ -262,6 +269,9 @@ HTML_PAGE = """
               </label>
               <label class="control-group">
                 <input type="radio" name="layout" value="album" checked> Album (1 bilde per side)
+              </label>
+              <label class="control-group">
+                <input type="radio" name="layout" value="cewe"> CEWE test (26 sider)
               </label>
             </div>
           </div>
@@ -899,6 +909,34 @@ def _draw_fit_in_box(c, pil_img: Image.Image, box_x: float, box_y: float, box_w:
     c.drawImage(pil_to_imagereader(pil_img), dx, dy, width=tw, height=th, mask="auto")
 
 
+def _set_cewe_pdf_boxes(c):
+    trim_box = (
+        CEWE_CONTENT_BLEED,
+        CEWE_CONTENT_BLEED,
+        CEWE_CONTENT_BLEED + CEWE_A4_CONTENT_TRIM_W,
+        CEWE_CONTENT_BLEED + CEWE_A4_CONTENT_TRIM_H,
+    )
+    bleed_box = (
+        0,
+        0,
+        CEWE_A4_CONTENT_TRIM_W + 2 * CEWE_CONTENT_BLEED,
+        CEWE_A4_CONTENT_TRIM_H + 2 * CEWE_CONTENT_BLEED,
+    )
+    for method_name, box in (("setTrimBox", trim_box), ("setBleedBox", bleed_box), ("setCropBox", bleed_box)):
+        method = getattr(c, method_name, None)
+        if method is None:
+            continue
+        try:
+            method(box)
+        except TypeError:
+            try:
+                method(box, method_name[3:-3].lower())
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+
 def build_pdf_combo_direct_from_pairs(
     original_pdf_bytes_list: list[bytes],
     coloring_bytes_list: list[bytes],
@@ -968,6 +1006,42 @@ def build_pdf_album_from_pairs(
         col.close()
 
         print(f"Bildepar {idx} ferdig på {time.time() - pair_start:.1f} sek", flush=True)
+
+    c.save()
+    out.seek(0)
+    return out.getvalue()
+
+
+def build_pdf_cewe_a4_content(coloring_bytes_list: list[bytes]) -> bytes:
+    """
+    CEWE FOTOBOK A4 portrait content test export.
+    Uses CEWE template values: 205 x 270 mm trim, 3 mm bleed, 5 mm safe area.
+    Pads to 26 pages because CEWE's PDF photobook content templates start there.
+    """
+    page_w = CEWE_A4_CONTENT_TRIM_W + 2 * CEWE_CONTENT_BLEED
+    page_h = CEWE_A4_CONTENT_TRIM_H + 2 * CEWE_CONTENT_BLEED
+    pagesize = (page_w, page_h)
+
+    safe_x = CEWE_CONTENT_BLEED + CEWE_CONTENT_SAFE
+    safe_y = CEWE_CONTENT_BLEED + CEWE_CONTENT_SAFE
+    safe_w = CEWE_A4_CONTENT_TRIM_W - 2 * CEWE_CONTENT_SAFE
+    safe_h = CEWE_A4_CONTENT_TRIM_H - 2 * CEWE_CONTENT_SAFE
+    page_count = max(CEWE_CONTENT_MIN_PAGES, len(coloring_bytes_list))
+
+    out = io.BytesIO()
+    c = pdfcanvas.Canvas(out, pagesize=pagesize)
+    c.setTitle("Fargeleggingshefte (CEWE A4 innhold)")
+    c.setAuthor("Fargeleggingsgenerator")
+
+    for idx in range(page_count):
+        _set_cewe_pdf_boxes(c)
+        if idx < len(coloring_bytes_list):
+            page_start = time.time()
+            col = pil_image_from_bytes(coloring_bytes_list[idx])
+            _draw_fit_in_box(c, col, safe_x, safe_y, safe_w, safe_h)
+            col.close()
+            print(f"CEWE-side {idx + 1} ferdig på {time.time() - page_start:.1f} sek", flush=True)
+        c.showPage()
 
     c.save()
     out.seek(0)
@@ -1056,7 +1130,11 @@ def handle_booklet_mode(detail: str, settings: GenerationSettings, booklet_files
     original_pdf_bytes_list = [prepared.pdf_bytes for prepared in prepared_images]
 
     pdf_start = time.time()
-    if layout == "combo":
+    if layout == "cewe":
+        pdf_bytes = build_pdf_cewe_a4_content(coloring_bytes_list)
+        title = "cewe-a4-innhold"
+        paper = "CEWE"
+    elif layout == "combo":
         pdf_bytes = build_pdf_combo_direct_from_pairs(original_pdf_bytes_list, coloring_bytes_list, paper=paper)
         title = "combo"
     else:
